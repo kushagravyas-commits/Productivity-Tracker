@@ -51,3 +51,8 @@ implementation.docx
 requirements_docs.docx
 SETUP_GUIDE.md
 adobe_app.docx
+
+# Word Documents
+*.docx
+# Word temporary/lock files
+~$*.docx
