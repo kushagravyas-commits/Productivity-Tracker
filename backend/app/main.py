@@ -378,3 +378,27 @@ def get_browser_context(day: str) -> list[BrowserContextItem]:
         )
         for r in rows
     ]
+
+@app.post("/api/v1/context/app", response_model=MessageResponse, tags=["app"])
+def post_app_context(payload: AppContextIn) -> MessageResponse:
+    """Receive a generic application context snapshot (Adobe, DaVinci, etc.)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO app_context
+            (captured_at, app_name, active_file_name, active_file_path, active_sequence, notes)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            payload.captured_at.isoformat(),
+            payload.app_name,
+            payload.active_file_name,
+            payload.active_file_path,
+            payload.active_sequence,
+            payload.notes,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return MessageResponse(message="ok")

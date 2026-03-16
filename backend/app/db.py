@@ -86,5 +86,19 @@ def init_db() -> None:
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_context (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            captured_at         TEXT NOT NULL,
+            app_name            TEXT NOT NULL,
+            active_file_name    TEXT,
+            active_file_path    TEXT,
+            active_sequence     TEXT,
+            notes               TEXT
+        )
+        """
+    )
     conn.commit()
+
     conn.close()

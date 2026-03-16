@@ -148,3 +148,20 @@ class BrowserContextItem(BaseModel):
     youtube_is_playing: bool | None
     youtube_progress_pct: int | None
     productivity_label: ProductivityLabel = "neutral"
+class AppContextIn(BaseModel):
+    captured_at: datetime
+    app_name: str
+    active_file_name: str | None = None
+    active_file_path: str | None = None
+    active_sequence: str | None = None
+    notes: str | None = None
+
+
+class AppContextItem(BaseModel):
+    id: int
+    captured_at: datetime
+    app_name: str
+    active_file_name: str | None
+    active_file_path: str | None
+    active_sequence: str | None
+    notes: str | None

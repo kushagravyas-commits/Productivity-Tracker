@@ -45,6 +45,11 @@ PROCESS_ALIASES = {
     "powerpnt.exe": "PowerPoint",
     "notion.exe": "Notion",
     "spotify.exe": "Spotify",
+    "photoshop.exe": "Photoshop",
+    "adobe premiere pro.exe": "Premiere Pro",
+    "afterfx.exe": "After Effects",
+    "illustrator.exe": "Illustrator",
+    "resolve.exe": "DaVinci Resolve",
     "antigravity.exe": "Antigravity",
 }
 
@@ -63,6 +68,11 @@ DEFAULT_RULES: dict[str, list[str]] = {
         "postman.exe",
         "docker desktop.exe",
         "figma.exe",
+        "photoshop.exe",
+        "adobe premiere pro.exe",
+        "afterfx.exe",
+        "illustrator.exe",
+        "resolve.exe",
         "antigravity.exe",
         "windsurf.exe",
         "webstorm64.exe"
