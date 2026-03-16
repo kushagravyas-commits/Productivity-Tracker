@@ -6,3 +6,48 @@ implementation.docx
 requirements_docs.docx
 SETUP_GUIDE.md
 adobe_app.docx
+
+tracker.db
+.claude
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Distribution / Packaging
+dist/
+build/
+*.egg-info/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+implementation.docx
+requirements_docs.docx
+SETUP_GUIDE.md
+adobe_app.docx
