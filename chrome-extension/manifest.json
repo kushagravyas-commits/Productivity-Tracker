@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "TrackFlow Browser Context",
+  "description": "Sends browser tab context to your local TrackFlow productivity tracker.",
+  "version": "0.0.1",
+  "permissions": ["tabs", "scripting", "storage", "alarms"],
+  "host_permissions": [
+    "http://127.0.0.1:8000/*",
+    "*://*.youtube.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "js": ["content_youtube.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "TrackFlow Context"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "name": "trackflow-context",
+  "displayName": "TrackFlow Context",
+  "description": "Sends editor context (open files, terminals, git branch) to your local TrackFlow productivity tracker.",
+  "version": "0.0.1",
+  "publisher": "trackflow",
+  "repository": { "type": "git", "url": "https://github.com/local/trackflow" },
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "TrackFlow Context",
+      "properties": {
+        "trackflow.apiUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "Base URL of your local TrackFlow backend."
+        },
+        "trackflow.intervalSeconds": {
+          "type": "number",
+          "default": 5,
+          "description": "How often (in seconds) to send editor context to TrackFlow."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.0.0",
+    "@vscode/vsce": "^2.0.0"
+  }
+}

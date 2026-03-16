@@ -1,0 +1,40 @@
+{
+  "productive_processes": [
+    "code.exe",
+    "cursor.exe",
+    "pycharm64.exe",
+    "chrome.exe"
+  ],
+  "neutral_processes": [
+    "slack.exe",
+    "outlook.exe",
+    "teams.exe"
+  ],
+  "distracting_processes": [
+    "spotify.exe",
+    "discord.exe"
+  ],
+  "productive_title_keywords": [
+    "github",
+    "jira",
+    "notion",
+    "docs",
+    "budget",
+    "proposal",
+    "research"
+  ],
+  "neutral_title_keywords": [
+    "gmail",
+    "calendar",
+    "meet",
+    "zoom"
+  ],
+  "distracting_title_keywords": [
+    "youtube",
+    "instagram",
+    "facebook",
+    "reddit",
+    "playlist",
+    "movie"
+  ]
+}
