@@ -1,0 +1,45 @@
+{
+  "name": "trackflow-dashboard",
+  "version": "1.0.0",
+  "description": "TrackFlow Productivity Dashboard",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win --x64",
+    "pack": "electron-builder --dir"
+  },
+  "author": "Varahe Analytics",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.varahe.trackflow",
+    "productName": "TrackFlow Dashboard",
+    "win": {
+      "target": "nsis",
+      "icon": "icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false
+    },
+    "extraResources": [
+      {
+        "from": "../dist_bin/TrackFlowServer.exe",
+        "to": "server/TrackFlowServer.exe"
+      },
+      {
+        "from": "../dist_bin/TrackFlowAgent.exe",
+        "to": "server/TrackFlowAgent.exe"
+      }
+    ],
+    "files": [
+      "main.js",
+      "preload.js"
+    ]
+  }
+}
