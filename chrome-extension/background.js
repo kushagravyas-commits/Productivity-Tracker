@@ -1,21 +1,25 @@
 // TrackFlow Browser Context — Background Service Worker
 // Polls active tab + all tabs every 5s and sends to local backend
 
-const API_URL = 'http://127.0.0.1:8000/api/v1/context/browser';
+const API_URL = 'http://127.0.0.1:10101/api/v1/context/browser';
 const INTERVAL_MS = 5000;
 
-// YouTube context is stored here when the content script messages us
-let youtubeContext = null;
-
-// Listen for messages from the YouTube content script
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type === 'YOUTUBE_CONTEXT') {
-    youtubeContext = msg.payload;
+// Stable machine ID — generated once, stored in chrome.storage.local
+let machineGuid = null;
+chrome.storage.local.get('trackflow_machine_guid', (result) => {
+  if (result.trackflow_machine_guid) {
+    machineGuid = result.trackflow_machine_guid;
+  } else {
+    machineGuid = crypto.randomUUID();
+    chrome.storage.local.set({ trackflow_machine_guid: machineGuid });
   }
 });
 
+// YouTube context is stored here when the content script messages us
+let youtubeContext = null;
+// Message listener is below (combined with keepalive listener)
+
 function detectBrowser() {
-  // Check navigator.userAgentData first (more reliable for Brave/Edge)
   if (navigator.userAgentData && navigator.userAgentData.brands) {
     const brands = navigator.userAgentData.brands.map(b => b.brand.toLowerCase());
     if (brands.includes('brave')) return 'Brave';
@@ -42,7 +46,6 @@ function extractDomain(url) {
 
 async function collectAndSend() {
   try {
-    // Get all tabs and the active tab
     const [allTabs, activeTabs] = await Promise.all([
       chrome.tabs.query({}),
       chrome.tabs.query({ active: true, currentWindow: true }),
@@ -53,12 +56,10 @@ async function collectAndSend() {
     const activeDomain = activeUrl ? extractDomain(activeUrl) : null;
     const isYouTube = activeUrl?.includes('youtube.com/watch');
 
-    // If we've moved away from YouTube, clear the cached context
     if (!isYouTube) {
       youtubeContext = null;
     }
 
-    // Collect titles of all open tabs (deduplicated domains for summary)
     const openDomains = [...new Set(
       allTabs
         .map(t => t.url ? extractDomain(t.url) : null)
@@ -66,44 +67,91 @@ async function collectAndSend() {
     )];
 
     const payload = {
-      captured_at: new Date().toISOString(),
+      // Send local device time (no timezone suffix) so admin dashboard shows correct time
+      captured_at: (() => { const n = new Date(); return new Date(n.getTime() - n.getTimezoneOffset() * 60000).toISOString().slice(0, 19); })(),
       browser_app: detectBrowser(),
       active_tab_url: activeUrl,
       active_tab_title: activeTab?.title ?? null,
       active_tab_domain: activeDomain,
       tab_count: allTabs.length,
       open_domains: openDomains,
-      // YouTube-specific (only if active)
       youtube_video_title: isYouTube ? youtubeContext?.videoTitle : null,
       youtube_channel: isYouTube ? youtubeContext?.channel : null,
       youtube_is_playing: isYouTube ? youtubeContext?.isPlaying : null,
       youtube_progress_pct: isYouTube ? youtubeContext?.progressPct : null,
     };
 
+    const headers = { 'Content-Type': 'application/json' };
+    if (machineGuid) {
+      headers['X-Machine-GUID'] = machineGuid;
+    }
+
     await fetch(API_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(payload),
     });
-  } catch {
-    // Silently fail — never disrupt browsing
+  } catch (err) {
+    console.error('[TrackFlow] Failed to send browser context:', err?.message ?? err);
   }
 }
 
-// Poll on interval using alarms (MV3 service workers can't use setInterval reliably)
-if (chrome.alarms) {
-  chrome.alarms.create('trackflow-poll', { periodInMinutes: 5 / 60 }); // every 5s
-
-  chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === 'trackflow-poll') {
-      collectAndSend();
+// --- Keep service worker alive using offscreen document ---
+// MV3 service workers suspend after ~30s. Offscreen doc sends keepalive messages
+// which count as "activity" and prevent suspension.
+async function ensureOffscreen() {
+  try {
+    if (typeof chrome.offscreen?.createDocument === 'function') {
+      const existing = await chrome.offscreen.hasDocument?.() ?? false;
+      if (!existing) {
+        await chrome.offscreen.createDocument({
+          url: 'offscreen.html',
+          reasons: ['BLOBS'],
+          justification: 'Keep service worker alive for continuous tab tracking'
+        });
+      }
     }
-  });
-} else {
-  console.error("TrackFlow: 'alarms' permission missing. Please reload extension from manifest.json.");
-  // Fallback for development (less reliable)
-  setInterval(collectAndSend, INTERVAL_MS);
+  } catch (e) {
+    // Offscreen API not available or doc already exists — ignore
+  }
 }
 
-// Also send immediately on startup
+// Listen for keepalive pings from offscreen doc
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === 'KEEPALIVE') {
+    // Just receiving the message keeps us alive
+  }
+  // Also handle YouTube context (existing)
+  if (msg.type === 'YOUTUBE_CONTEXT') {
+    youtubeContext = msg.payload;
+  }
+});
+
+// Track the active interval so we can restart it after suspension
+let _intervalId = null;
+function startPolling() {
+  if (_intervalId) clearInterval(_intervalId);
+  _intervalId = setInterval(collectAndSend, INTERVAL_MS);
+}
+
+// 1. Alarms — wake up service worker every minute (Chrome minimum)
+//    Also used to restart the setInterval after the worker was suspended
+if (chrome.alarms) {
+  chrome.alarms.create('trackflow-poll', { periodInMinutes: 1 });
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === 'trackflow-poll') {
+      collectAndSend();       // immediate collection after wake
+      startPolling();         // restart the 5s interval (may have stopped during suspension)
+      ensureOffscreen();      // re-create offscreen doc if it died
+    }
+  });
+}
+
+// 2. setInterval — poll every 5s while service worker is active
+startPolling();
+
+// 3. Start offscreen doc to keep us alive
+ensureOffscreen();
+
+// 4. Send immediately on startup
 collectAndSend();

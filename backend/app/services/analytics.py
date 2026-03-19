@@ -5,7 +5,9 @@ from datetime import date, datetime, timedelta
 from typing import Iterable
 
 
-def parse_ts(value: str) -> datetime:
+def parse_ts(value: str | datetime) -> datetime:
+    if isinstance(value, datetime):
+        return value
     return datetime.fromisoformat(value)
 
 
@@ -19,7 +21,7 @@ def format_seconds(seconds: int) -> str:
     return f"{secs}s"
 
 
-def clamp_duration_seconds(started_at: str, ended_at: str) -> int:
+def clamp_duration_seconds(started_at: str | datetime, ended_at: str | datetime) -> int:
     delta = parse_ts(ended_at) - parse_ts(started_at)
     return max(int(delta.total_seconds()), 0)
 
@@ -34,7 +36,7 @@ def split_by_day(events: list[dict], target_day: date) -> list[dict]:
         started = parse_ts(event["started_at"])
         if started.date() == target_day:
             result.append(event)
-    return sorted(result, key=lambda row: row["started_at"])
+    return sorted(result, key=lambda row: parse_ts(row["started_at"]))
 
 
 def summarize_day(events: list[dict], idle_seconds: int) -> str:
@@ -72,7 +74,8 @@ def productivity_totals(events: list[dict]) -> dict[str, int]:
 def top_apps(events: list[dict], limit: int = 5) -> list[tuple[str, int]]:
     counter: Counter[str] = Counter()
     for event in events:
-        counter[event["app_name"]] += clamp_duration_seconds(event["started_at"], event["ended_at"])
+        app = event.get("app_name") or "Unknown"
+        counter[app] += clamp_duration_seconds(event["started_at"], event["ended_at"])
     return counter.most_common(limit)
 
 
@@ -117,7 +120,7 @@ def build_timeline(events: list[dict], idle_periods: list[dict] = None) -> list[
         timeline_items.append({
             "started_at": parse_ts(event["started_at"]),
             "ended_at": parse_ts(event["ended_at"]),
-            "app_name": event["app_name"],
+            "app_name": event.get("app_name") or "Unknown",
             "window_title": event.get("window_title"),
             "productivity_label": event.get("productivity_label") or "neutral",
         })
@@ -172,7 +175,7 @@ def group_sessions(events: list[dict], gap_minutes: int = 15) -> list[list[dict]
     if not events:
         return []
 
-    ordered = sorted(events, key=lambda row: row["started_at"])
+    ordered = sorted(events, key=lambda row: parse_ts(row["started_at"]))
     sessions: list[list[dict]] = [[ordered[0]]]
     gap = timedelta(minutes=gap_minutes)
 

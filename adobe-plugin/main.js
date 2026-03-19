@@ -1,6 +1,6 @@
 (function () {
     const csInterface = new CSInterface();
-    const API_URL = "http://127.0.0.1:8000/api/v1/context/app";
+    const API_URL = "http://127.0.0.1:10101/api/v1/context/app";
     const POLL_INTERVAL = 5000; // 5 seconds
 
     function getAppData() {

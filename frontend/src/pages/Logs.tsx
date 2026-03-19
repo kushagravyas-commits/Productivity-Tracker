@@ -21,12 +21,13 @@ interface LogsPageProps {
   message: string
   onDayChange: (day: string) => void
   onLoadToday: () => void
+  onRefresh: () => void
 }
 
 type SortBy = 'time' | 'duration' | 'app'
 type SortOrder = 'asc' | 'desc'
 
-export default function Logs({ day, dashboard, loading, message, onDayChange, onLoadToday }: LogsPageProps) {
+export default function Logs({ day, dashboard, loading, message, onDayChange, onLoadToday, onRefresh }: LogsPageProps) {
   const [filters, setFilters] = useState<FilterState>({ appName: null, category: null, searchQuery: '' })
   const [sortBy, setSortBy] = useState<SortBy>('time')
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc')
@@ -73,6 +74,7 @@ export default function Logs({ day, dashboard, loading, message, onDayChange, on
             <input type="date" value={day} onChange={e => onDayChange(e.target.value)} />
           </div>
           <button className="btn btn-primary" onClick={onLoadToday}>Today</button>
+          <button className="btn-refresh" onClick={onRefresh} title="Refresh data">↻</button>
         </div>
       </div>
 
@@ -212,7 +214,7 @@ export default function Logs({ day, dashboard, loading, message, onDayChange, on
             items={sortedEvents}
             sortBy={sortBy}
             sortOrder={sortOrder}
-            onSort={(by, ord) => { setSortBy(by as SortBy); setSortOrder(ord) }}
+            onSort={(by, ord) => { setSortBy(by as SortBy); setSortOrder(ord as SortOrder) }}
           />
         ) : (
           <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }}>

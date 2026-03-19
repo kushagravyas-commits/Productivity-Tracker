@@ -1,6 +1,20 @@
 import * as vscode from 'vscode';
 import * as http from 'http';
 import * as path from 'path';
+import * as cp from 'child_process';
+
+function getMachineGuid(): string {
+    try {
+        if (process.platform === 'win32') {
+            const out = cp.execSync('reg query HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography /v MachineGuid').toString();
+            const match = /MachineGuid\s+REG_SZ\s+(.+)/.exec(out);
+            if (match) return match[1].trim();
+        }
+    } catch {
+        // Fallback
+    }
+    return vscode.env.machineId; // VS Code's own unique ID as fallback
+}
 
 let timer: ReturnType<typeof setInterval> | undefined;
 
@@ -60,7 +74,7 @@ function getOpenFiles(): string[] {
 
 async function collectAndSend(): Promise<void> {
   const config = vscode.workspace.getConfiguration('trackflow');
-  const apiUrl: string = config.get('apiUrl') ?? 'http://127.0.0.1:8000';
+  const apiUrl: string = config.get('apiUrl') ?? 'http://127.0.0.1:10101';
 
   const editor = vscode.window.activeTextEditor;
   const activeFile = editor ? path.basename(editor.document.fileName) : null;
@@ -73,7 +87,8 @@ async function collectAndSend(): Promise<void> {
   const gitBranch = await getGitBranch();
 
   const context: EditorContext = {
-    captured_at: new Date().toISOString(),
+    // Send local device time (no timezone suffix) so admin dashboard shows the user's clock time
+    captured_at: (() => { const n = new Date(); return new Date(n.getTime() - n.getTimezoneOffset() * 60000).toISOString().slice(0, 19); })(),
     editor_app: getEditorApp(),
     workspace,
     active_file: activeFile,
@@ -94,12 +109,13 @@ function sendPayload(apiUrl: string, context: EditorContext): void {
     const url = new URL('/api/v1/context/editor', apiUrl);
     const options: http.RequestOptions = {
       hostname: url.hostname,
-      port: parseInt(url.port) || 8000,
+      port: parseInt(url.port) || 10101,
       path: url.pathname,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body),
+        'X-Machine-GUID': getMachineGuid(),
       },
     };
     const req = http.request(options);

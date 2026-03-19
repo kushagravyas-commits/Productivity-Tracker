@@ -1,4 +1,4 @@
-export type PageType = 'dashboard' | 'logs' | 'deep'
+export type PageType = 'dashboard' | 'logs' | 'deep' | 'employees'
 
 interface SidebarProps {
   currentPage: PageType
@@ -7,6 +7,7 @@ interface SidebarProps {
   onThemeToggle?: () => void
   day: string
   isLive: boolean
+  isUserSelected: boolean
 }
 
 export default function Sidebar({
@@ -16,12 +17,20 @@ export default function Sidebar({
   onThemeToggle,
   day,
   isLive,
+  isUserSelected
 }: SidebarProps) {
-  const navItems: { id: PageType; icon: string; label: string }[] = [
-    { id: 'dashboard', icon: '⚡', label: 'Dashboard' },
-    { id: 'logs', icon: '📋', label: 'Logs & Analytics' },
-    { id: 'deep', icon: '🔬', label: 'Deep Activity' },
+  let navItems: { id: PageType; icon: string; label: string }[] = [
+    { id: 'employees', icon: '👥', label: 'Team Members' },
   ]
+
+  if (isUserSelected) {
+    navItems = [
+      { id: 'dashboard', icon: '⚡', label: 'Dashboard' },
+      { id: 'logs', icon: '📋', label: 'Logs & Analytics' },
+      { id: 'deep', icon: '🔬', label: 'Deep Activity' },
+      { id: 'employees', icon: '👥', label: 'Back to Team' },
+    ]
+  }
 
   return (
     <nav className="sidebar">

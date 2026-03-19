@@ -18,9 +18,8 @@ export default function AppTrendLine({ items }: Props) {
       appHour[item.app_name][key] = (appHour[item.app_name][key] || 0) + ms
     })
 
-    const isHours = totalMs >= 3600000
-    const divisor = isHours ? 3600000 : 60000
-    const unit = isHours ? 'hrs' : 'min'
+    const divisor = 60000
+    const unit = 'min'
 
     const totals = Object.entries(appHour).map(([app, hours]) => ({ app, total: Object.values(hours).reduce((a, b) => a + b, 0) }))
     const topApps = totals.sort((a, b) => b.total - a.total).slice(0, 5).map(a => a.app)
@@ -44,9 +43,9 @@ export default function AppTrendLine({ items }: Props) {
     <ResponsiveContainer width="100%" height="100%">
       <LineChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" vertical={false} />
-        <XAxis dataKey="hour" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} interval={3} />
-        <YAxis tick={{ fontSize: 10 }} axisLine={false} tickLine={false} width={32} unit={unit} />
-        <Tooltip contentStyle={tooltipStyle} labelStyle={{ color: 'var(--text-primary)', fontWeight: 600 }} formatter={(v: number) => [`${v} ${unit}`, undefined]} />
+        <XAxis dataKey="hour" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} axisLine={false} tickLine={false} interval={3} />
+        <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} axisLine={false} tickLine={false} width={48} unit="m" />
+        <Tooltip contentStyle={tooltipStyle} labelStyle={{ color: 'var(--text-primary)', fontWeight: 600 }} formatter={(v: number) => [`${v}m`, undefined]} />
         <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
         {topApps.map((app, i) => (
           <Line key={app} type="monotone" dataKey={app} stroke={COLORS[i % COLORS.length]} strokeWidth={2} dot={false} name={app} />

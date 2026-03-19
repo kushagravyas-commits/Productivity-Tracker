@@ -15,7 +15,7 @@
       "properties": {
         "trackflow.apiUrl": {
           "type": "string",
-          "default": "http://127.0.0.1:8000",
+          "default": "http://127.0.0.1:10101",
           "description": "Base URL of your local TrackFlow backend."
         },
         "trackflow.intervalSeconds": {

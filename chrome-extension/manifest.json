@@ -3,9 +3,10 @@
   "name": "TrackFlow Browser Context",
   "description": "Sends browser tab context to your local TrackFlow productivity tracker.",
   "version": "0.0.1",
-  "permissions": ["tabs", "scripting", "storage", "alarms"],
+  "permissions": ["tabs", "scripting", "storage", "alarms", "offscreen"],
   "host_permissions": [
-    "http://127.0.0.1:8000/*",
+    "http://127.0.0.1:10101/*",
+    "http://127.0.0.1:8080/*",
     "*://*.youtube.com/*"
   ],
   "background": {

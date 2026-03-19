@@ -19,9 +19,8 @@ export default function CategoryTrendLine({ items }: Props) {
       if (cat in hourData[key]) hourData[key][cat] += ms
     })
 
-    const isHours = totalMs >= 3600000
-    const divisor = isHours ? 3600000 : 60000
-    const unit = isHours ? 'hrs' : 'min'
+    const divisor = 60000
+    const unit = 'min'
 
     const chartData = Array.from({ length: 24 }, (_, h) => {
       const key = `${String(h).padStart(2, '0')}:00`
@@ -54,9 +53,9 @@ export default function CategoryTrendLine({ items }: Props) {
           ))}
         </defs>
         <CartesianGrid strokeDasharray="3 3" vertical={false} />
-        <XAxis dataKey="hour" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} interval={3} />
-        <YAxis tick={{ fontSize: 10 }} axisLine={false} tickLine={false} width={32} unit={unit} />
-        <Tooltip contentStyle={tooltipStyle} labelStyle={{ color: 'var(--text-primary)', fontWeight: 600 }} formatter={(v: number) => [`${v} ${unit}`, undefined]} />
+        <XAxis dataKey="hour" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} axisLine={false} tickLine={false} interval={3} />
+        <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} axisLine={false} tickLine={false} width={48} unit="m" />
+        <Tooltip contentStyle={tooltipStyle} labelStyle={{ color: 'var(--text-primary)', fontWeight: 600 }} formatter={(v: number) => [`${v}m`, undefined]} />
         <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
         <Area type="monotone" dataKey="productive" stroke="#10b981" strokeWidth={2} fill="url(#g-prod)" name="Productive" />
         <Area type="monotone" dataKey="neutral"    stroke="#3b82f6" strokeWidth={2} fill="url(#g-neut)" name="Neutral" />

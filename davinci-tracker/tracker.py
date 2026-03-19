@@ -3,7 +3,7 @@ import sys
 import time
 import json
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 
 # DaVinci Resolve Python API requires these imports and setup
 # The module is usually installed with Resolve or found in specific paths
@@ -26,11 +26,28 @@ def get_resolve():
         except ImportError:
             return None
 
+def get_machine_guid() -> str:
+    """Get unique machine GUID from Windows registry."""
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography")
+        guid, _ = winreg.QueryValueEx(key, "MachineGuid")
+        winreg.CloseKey(key)
+        return str(guid)
+    except:
+        import uuid
+        return str(uuid.getnode())
+
 def main():
-    API_URL = "http://127.0.0.1:8000/api/v1/context/app"
+    API_URL = "http://127.0.0.1:10101/api/v1/context/app"
     POLL_INTERVAL = 5 # seconds
     
     print("Starting DaVinci Resolve Productivity Tracker...")
+    machine_guid = get_machine_guid()
+    headers = {
+        "X-Machine-GUID": machine_guid,
+        "Content-Type": "application/json"
+    }
     
     while True:
         try:
@@ -53,11 +70,11 @@ def main():
                     "active_file_name": project_name,
                     "active_file_path": f"Project: {project_name}", # Resolve projects are database entities
                     "active_sequence": timeline_name,
-                    "captured_at": datetime.now().isoformat()
+                    "captured_at": datetime.now(timezone.utc).isoformat()
                 }
                 
                 try:
-                    res = requests.post(API_URL, json=payload, timeout=5)
+                    res = requests.post(API_URL, json=payload, headers=headers, timeout=5)
                     if res.status_code != 200:
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] Agent error: {res.status_code}")
                 except requests.RequestException:

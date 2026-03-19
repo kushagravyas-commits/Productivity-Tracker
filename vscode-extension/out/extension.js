@@ -38,6 +38,21 @@ exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const http = __importStar(require("http"));
 const path = __importStar(require("path"));
+const cp = __importStar(require("child_process"));
+function getMachineGuid() {
+    try {
+        if (process.platform === 'win32') {
+            const out = cp.execSync('reg query HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography /v MachineGuid').toString();
+            const match = /MachineGuid\s+REG_SZ\s+(.+)/.exec(out);
+            if (match)
+                return match[1].trim();
+        }
+    }
+    catch {
+        // Fallback
+    }
+    return vscode.env.machineId; // VS Code's own unique ID as fallback
+}
 let timer;
 async function getGitBranch() {
     // Try multiple IDs — 'vscode.git' is standard; forks like Antigravity may differ
@@ -86,7 +101,7 @@ function getOpenFiles() {
 }
 async function collectAndSend() {
     const config = vscode.workspace.getConfiguration('trackflow');
-    const apiUrl = config.get('apiUrl') ?? 'http://127.0.0.1:8000';
+    const apiUrl = config.get('apiUrl') ?? 'http://127.0.0.1:10101';
     const editor = vscode.window.activeTextEditor;
     const activeFile = editor ? path.basename(editor.document.fileName) : null;
     const activeFilePath = editor ? editor.document.fileName : null;
@@ -95,7 +110,8 @@ async function collectAndSend() {
     const workspace = wsFolder ? wsFolder.name : null;
     const gitBranch = await getGitBranch();
     const context = {
-        captured_at: new Date().toISOString(),
+        // Send local device time (no timezone suffix) so admin dashboard shows the user's clock time
+        captured_at: (() => { const n = new Date(); return new Date(n.getTime() - n.getTimezoneOffset() * 60000).toISOString().slice(0, 19); })(),
         editor_app: getEditorApp(),
         workspace,
         active_file: activeFile,
@@ -114,12 +130,13 @@ function sendPayload(apiUrl, context) {
         const url = new URL('/api/v1/context/editor', apiUrl);
         const options = {
             hostname: url.hostname,
-            port: parseInt(url.port) || 8000,
+            port: parseInt(url.port) || 10101,
             path: url.pathname,
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Content-Length': Buffer.byteLength(body),
+                'X-Machine-GUID': getMachineGuid(),
             },
         };
         const req = http.request(options);

@@ -4,6 +4,7 @@ const labelColor: Record<TimelineItem['productivity_label'], string> = {
   productive: 'pill productive',
   neutral: 'pill neutral',
   distracting: 'pill distracting',
+  idle: 'pill idle',
 }
 
 function fmt(ts: string) {

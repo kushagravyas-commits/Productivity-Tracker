@@ -1,10 +1,38 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage } = require('electron')
-const { spawn, execFile } = require('child_process')
+const { spawn, execSync, execFile } = require('child_process')
 const path = require('path')
 const http = require('http')
 
 const PORT = 8080
 const SERVER_URL = `http://127.0.0.1:${PORT}`
+
+// --- Kill old servers/processes before starting fresh ---
+function cleanupOldProcesses() {
+  const targets = ['TrackFlowServer.exe', 'TrackFlowAgent.exe']
+  for (const name of targets) {
+    try {
+      execSync(`taskkill /f /im "${name}"`, { windowsHide: true, stdio: 'ignore' })
+      console.log(`Killed old ${name}`)
+    } catch (e) { /* not running, ignore */ }
+  }
+  // Also kill anything on our ports (dev servers, old instances)
+  for (const port of [PORT, 10101, 5173]) {
+    try {
+      const result = execSync(`netstat -ano | findstr "LISTENING" | findstr ":${port} "`, { encoding: 'utf-8', windowsHide: true })
+      const lines = result.trim().split('\n')
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/)
+        const pid = parts[parts.length - 1]
+        if (pid && pid !== '0') {
+          try {
+            execSync(`taskkill /f /pid ${pid}`, { windowsHide: true, stdio: 'ignore' })
+            console.log(`Killed PID ${pid} on port ${port}`)
+          } catch (e) { /* ignore */ }
+        }
+      }
+    } catch (e) { /* no process on port, ignore */ }
+  }
+}
 
 let mainWindow = null
 let tray = null
@@ -115,8 +143,12 @@ function createWindow() {
 
 // --- System tray ---
 function createTray() {
-  // Use a simple 16x16 icon (or default)
-  const icon = nativeImage.createEmpty()
+  // Try to load icon from resources (packaged) or project root (dev)
+  const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'icon.ico')
+    : path.join(__dirname, 'icon.ico')
+  let icon = nativeImage.createFromPath(iconPath)
+  if (icon.isEmpty()) icon = nativeImage.createEmpty()
   tray = new Tray(icon)
   tray.setToolTip('TrackFlow Dashboard')
 
@@ -164,6 +196,12 @@ function killProcesses() {
 
 // --- App lifecycle ---
 app.whenReady().then(async () => {
+  // Kill any old servers/dev processes occupying our ports
+  cleanupOldProcesses()
+
+  // Small delay to let ports free up
+  await new Promise(r => setTimeout(r, 1000))
+
   // Start server + agent
   startServer()
   startAgent()

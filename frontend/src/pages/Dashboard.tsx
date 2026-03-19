@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import type { DashboardResponse, HistoryResponse } from '../types'
+import type { DashboardResponse } from '../types'
 import type { WeeklyBreakdown } from '../App'
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 
@@ -28,13 +28,13 @@ function formatMinutes(min: number) {
 interface DashboardPageProps {
   day: string
   dashboard: DashboardResponse | null
-  history: HistoryResponse | null
   loading: boolean
   message: string
   lastUpdated: string
   weeklyBreakdowns: WeeklyBreakdown[]
   onDayChange: (day: string) => void
   onLoadToday: () => void
+  onRefresh: () => void
 }
 
 export default function Dashboard({
@@ -46,6 +46,7 @@ export default function Dashboard({
   weeklyBreakdowns,
   onDayChange,
   onLoadToday,
+  onRefresh,
 }: DashboardPageProps) {
   const isToday = day === todayString()
 
@@ -79,6 +80,7 @@ export default function Dashboard({
           productive:  wb.productive,
           neutral:     wb.neutral,
           distracting: wb.distracting,
+          idle:        wb.idle || 0,
         }
       })
     }
@@ -87,7 +89,7 @@ export default function Dashboard({
       const d = new Date(day + 'T00:00:00')
       d.setDate(d.getDate() - (6 - i))
       const dayNum = String(d.getDate()).padStart(2, '0')
-      return { day: `${DAY_NAMES[d.getDay()]} ${dayNum}`, productive: 0, neutral: 0, distracting: 0 }
+      return { day: `${DAY_NAMES[d.getDay()]} ${dayNum}`, productive: 0, neutral: 0, distracting: 0, idle: 0 }
     })
   }, [weeklyBreakdowns, day])
 
@@ -113,6 +115,7 @@ export default function Dashboard({
             <input type="date" value={day} onChange={e => onDayChange(e.target.value)} />
           </div>
           <button className="btn btn-primary" onClick={onLoadToday}>Today</button>
+          <button className="btn-refresh" onClick={onRefresh} title="Refresh data">↻</button>
         </div>
       </div>
 
@@ -162,10 +165,14 @@ export default function Dashboard({
                     <stop offset="5%" stopColor="#ef4444" stopOpacity={0.2} />
                     <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
                   </linearGradient>
+                  <linearGradient id="gradIdle" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#6b7280" stopOpacity={0.2} />
+                    <stop offset="95%" stopColor="#6b7280" stopOpacity={0} />
+                  </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="day" axisLine={false} tickLine={false} />
-                <YAxis axisLine={false} tickLine={false} width={36} unit="m" />
+                <YAxis axisLine={false} tickLine={false} width={48} unit="m" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
                 <Tooltip
                   contentStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-strong)', borderRadius: 10 }}
                   itemStyle={{ color: 'var(--text-secondary)' }}
@@ -175,6 +182,7 @@ export default function Dashboard({
                 <Area type="monotone" dataKey="productive" stroke="#10b981" strokeWidth={2} fill="url(#gradProd)" name="Productive" />
                 <Area type="monotone" dataKey="neutral" stroke="#3b82f6" strokeWidth={2} fill="url(#gradNeut)" name="Neutral" />
                 <Area type="monotone" dataKey="distracting" stroke="#ef4444" strokeWidth={2} fill="url(#gradDist)" name="Distracting" />
+                <Area type="monotone" dataKey="idle" stroke="#6b7280" strokeWidth={2} fill="url(#gradIdle)" name="Idle" />
               </AreaChart>
             </ResponsiveContainer>
           </div>

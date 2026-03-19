@@ -19,7 +19,6 @@
     "productName": "TrackFlow Dashboard",
     "win": {
       "target": "nsis",
-      "icon": "icon.ico",
       "signAndEditExecutable": false
     },
     "nsis": {

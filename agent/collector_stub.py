@@ -11,7 +11,7 @@ import time
 import urllib.request
 from datetime import datetime, timedelta
 
-API_URL = "http://127.0.0.1:8000/api/v1/events"
+API_URL = "http://127.0.0.1:10101/api/v1/events"
 INTERVAL_SECONDS = 10
 
 sample_events = [

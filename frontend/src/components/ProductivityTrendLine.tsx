@@ -5,7 +5,7 @@ import type { TimelineItem } from '../types'
 interface Props { items: TimelineItem[] }
 
 export default function ProductivityTrendLine({ items }: Props) {
-  const { data, unit } = useMemo(() => {
+  const { data } = useMemo(() => {
     const hourData: Record<string, { productive: number; total: number }> = {}
     let totalMs = 0
 
@@ -28,7 +28,7 @@ export default function ProductivityTrendLine({ items }: Props) {
       const raw = hourData[key]
       return {
         hour: key,
-        score: raw ? Math.round((raw.productive / raw.total) * 100) : 0,
+        score: raw?.total ? Math.round((raw.productive / raw.total) * 100) : 0,
         tracked: +((raw?.total || 0) / divisor).toFixed(2),
       }
     })
@@ -48,8 +48,8 @@ export default function ProductivityTrendLine({ items }: Props) {
           </linearGradient>
         </defs>
         <CartesianGrid strokeDasharray="3 3" vertical={false} />
-        <XAxis dataKey="hour" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} interval={3} />
-        <YAxis tick={{ fontSize: 10 }} axisLine={false} tickLine={false} width={32} unit="%" domain={[0, 100]} />
+        <XAxis dataKey="hour" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} axisLine={false} tickLine={false} interval={3} />
+        <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} axisLine={false} tickLine={false} width={48} unit="%" domain={[0, 100]} />
         <Tooltip
           contentStyle={tooltipStyle}
           labelStyle={{ color: 'var(--text-primary)', fontWeight: 600 }}

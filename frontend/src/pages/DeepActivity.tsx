@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import type { EditorContextItem, BrowserContextItem } from '../api'
+import { useMemo, useState, useEffect } from 'react'
+import type { EditorContextItem, BrowserContextItem, AppContextItem } from '../api'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
@@ -42,66 +42,63 @@ interface DeepActivityProps {
   day: string
   editorContext: EditorContextItem[]
   browserContext: BrowserContextItem[]
+  appContext: AppContextItem[]
+  loading?: boolean
   onDayChange: (day: string) => void
   onLoadToday: () => void
+  onRefresh: () => void
 }
 
-type ActivityCategory = 'editor' | 'browser'
+type ActivityCategory = 'editor' | 'browser' | 'app'
 
-export default function DeepActivity({ day, editorContext, browserContext, onDayChange, onLoadToday }: DeepActivityProps) {
+export default function DeepActivity({ day, editorContext, browserContext, appContext, loading, onDayChange, onLoadToday, onRefresh }: DeepActivityProps) {
   const isToday = day === todayString()
   const [category, setCategory] = useState<ActivityCategory>('editor')
+  const [userPickedCategory, setUserPickedCategory] = useState(false)
   const [selectedApp, setSelectedApp] = useState<string | null>(null)
+
+  // Auto-select the best tab once data first arrives, but only if user hasn't clicked a tab yet
+  useEffect(() => {
+    if (userPickedCategory) return
+    if (appContext.length > 0) setCategory('app')
+    else if (editorContext.length > 0) setCategory('editor')
+    else if (browserContext.length > 0) setCategory('browser')
+  }, [editorContext.length, browserContext.length, appContext.length, userPickedCategory])
 
   // --- EDITOR DATA PROCESSING ---
   const editorApps = useMemo(() => Array.from(new Set(editorContext.map(e => e.editor_app))), [editorContext])
   const activeEditorApp = selectedApp ?? editorApps[0] ?? null
-  const appData = useMemo(() => editorContext.filter(e => e.editor_app === activeEditorApp), [editorContext, activeEditorApp])
+  const appEditorData = useMemo(() => editorContext.filter(e => e.editor_app === activeEditorApp), [editorContext, activeEditorApp])
 
   const fileFreq = useMemo(() => {
     const counts: Record<string, number> = {}
-    for (const snap of appData) {
+    for (const snap of appEditorData) {
       if (snap.active_file) counts[snap.active_file] = (counts[snap.active_file] ?? 0) + 1
     }
     return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([file, count]) => ({ file, seconds: count * 5 }))
-  }, [appData])
+  }, [appEditorData])
 
   const langData = useMemo(() => {
     const counts: Record<string, number> = {}
-    for (const snap of appData) {
+    for (const snap of appEditorData) {
       if (!snap.language) continue
       const l = snap.language
       counts[l] = (counts[l] ?? 0) + 1
     }
     return Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([lang, count]) => ({ name: lang, value: count * 5, color: langColor(lang) }))
-  }, [appData])
+  }, [appEditorData])
 
   const editorSummary = useMemo(() => {
-    if (!appData.length) return null
-    const snap = appData[appData.length - 1]
+    if (!appEditorData.length) return null
+    const snap = appEditorData[appEditorData.length - 1]
     return {
       workspace: snap.workspace,
       gitBranch: snap.git_branch,
-      maxTerminals: Math.max(...appData.map(e => e.terminal_count)),
-      debugSessions: appData.filter(e => e.debugger_active).length,
-      totalSnaps: appData.length
+      maxTerminals: Math.max(...appEditorData.map(e => e.terminal_count)),
+      debugSessions: appEditorData.filter(e => e.debugger_active).length,
+      totalSnaps: appEditorData.length
     }
-  }, [appData])
-
-  const fileTimeline = useMemo(() => {
-    const segments: { file: string; lang: string | null; start: string; end: string; count: number }[] = []
-    for (const snap of appData) {
-      const last = segments[segments.length - 1]
-      const currentFile = snap.active_file ?? '—'
-      if (last && last.file === currentFile) {
-        last.end = snap.captured_at
-        last.count++
-      } else {
-        segments.push({ file: currentFile, lang: snap.language, start: snap.captured_at, end: snap.captured_at, count: 1 })
-      }
-    }
-    return segments
-  }, [appData])
+  }, [appEditorData])
 
   // --- BROWSER DATA PROCESSING ---
   const browserApps = useMemo(() => Array.from(new Set(browserContext.map(b => b.browser_app))), [browserContext])
@@ -142,7 +139,7 @@ export default function DeepActivity({ day, editorContext, browserContext, onDay
         segments.push({ title: currentTitle, domain: snap.active_tab_domain, start: snap.captured_at, end: snap.captured_at, count: 1, label: currentLabel })
       }
     }
-    return segments
+    return segments.reverse()
   }, [browserData])
 
   const browserSummary = useMemo(() => {
@@ -153,7 +150,51 @@ export default function DeepActivity({ day, editorContext, browserContext, onDay
     return { totalTabs, uniqueDomains, ytVideos, totalSnaps: browserData.length }
   }, [browserData])
 
-  const hasData = (category === 'editor' ? appData.length : browserData.length) > 0
+  // --- APP (ADOBE/DAVINCI) DATA PROCESSING ---
+  const genericApps = useMemo(() => Array.from(new Set(appContext.map(a => a.app_name))), [appContext])
+  const activeGenericApp = selectedApp ?? genericApps[0] ?? null
+  const genericAppData = useMemo(() => appContext.filter(a => a.app_name === activeGenericApp), [appContext, activeGenericApp])
+
+  const genericFileFreq = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const snap of genericAppData) {
+      const key = snap.active_file_name || snap.active_file_path || 'Untitled'
+      counts[key] = (counts[key] ?? 0) + 1
+    }
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([file, count]) => ({ file, seconds: count * 5 }))
+  }, [genericAppData])
+
+  const genericTimeline = useMemo(() => {
+    const segments: { file: string; sequence: string | null; start: string; end: string; count: number }[] = []
+    for (const snap of genericAppData) {
+      const last = segments[segments.length - 1]
+      const currentFile = snap.active_file_name || snap.active_file_path || 'Untitled'
+      const currentSeq = snap.active_sequence
+      if (last && last.file === currentFile && last.sequence === currentSeq) {
+        last.end = snap.captured_at
+        last.count++
+      } else {
+        segments.push({ file: currentFile, sequence: currentSeq, start: snap.captured_at, end: snap.captured_at, count: 1 })
+      }
+    }
+    return segments.reverse()
+  }, [genericAppData])
+
+  const genericSummary = useMemo(() => {
+    if (!genericAppData.length) return null
+    const totalSnaps = genericAppData.length
+    const uniqueFiles = new Set(genericAppData.map(a => a.active_file_path).filter(Boolean)).size
+    return { totalSnaps, uniqueFiles }
+  }, [genericAppData])
+
+  const hasData = (
+    category === 'editor' ? appEditorData.length :
+    category === 'browser' ? browserData.length :
+    genericAppData.length
+  ) > 0
+
+  const navApps = category === 'editor' ? editorApps : category === 'browser' ? browserApps : genericApps
+  const activeApp = category === 'editor' ? activeEditorApp : category === 'browser' ? activeBrowserApp : activeGenericApp
 
   return (
     <div className="page-shell">
@@ -166,15 +207,21 @@ export default function DeepActivity({ day, editorContext, browserContext, onDay
             <div style={{ display: 'flex', background: 'var(--bg-elevated)', borderRadius: 12, padding: 4 }}>
               <button
                 className={`tab-btn ${category === 'editor' ? 'active' : ''}`}
-                onClick={() => { setCategory('editor'); setSelectedApp(null); }}
+                onClick={() => { setCategory('editor'); setSelectedApp(null); setUserPickedCategory(true); }}
               >
                 💻 Editor
               </button>
               <button
                 className={`tab-btn ${category === 'browser' ? 'active' : ''}`}
-                onClick={() => { setCategory('browser'); setSelectedApp(null); }}
+                onClick={() => { setCategory('browser'); setSelectedApp(null); setUserPickedCategory(true); }}
               >
                 🌐 Browser
+              </button>
+              <button
+                className={`tab-btn ${category === 'app' ? 'active' : ''}`}
+                onClick={() => { setCategory('app'); setSelectedApp(null); setUserPickedCategory(true); }}
+              >
+                🎨 App
               </button>
             </div>
           </div>
@@ -184,19 +231,30 @@ export default function DeepActivity({ day, editorContext, browserContext, onDay
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input type="date" value={day} onChange={e => onDayChange(e.target.value)} className="date-input" />
             {!isToday && <button className="btn-primary" onClick={onLoadToday}>Today</button>}
+            <button className="btn-refresh" onClick={onRefresh} disabled={loading} title="Refresh data" style={loading ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}>↻</button>
           </div>
         </div>
       </div>
 
       {/* App pills */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 24, flexWrap: 'wrap' }}>
-        {(category === 'editor' ? editorApps : browserApps).map(app => (
+        {navApps.map(app => (
           <button
             key={app}
             onClick={() => setSelectedApp(app)}
-            className={`pill-btn ${(category === 'editor' ? activeEditorApp : activeBrowserApp) === app ? 'active' : ''}`}
+            className={`pill-btn ${activeApp === app ? 'active' : ''}`}
           >
-            {app === 'Antigravity' ? '🚀' : app === 'VS Code' ? '💻' : app === 'Chrome' ? '🌐' : app === 'Brave' ? '🦁' : '🖥️'} {app}
+            {
+              app.includes('Photoshop') ? '🖌️' :
+              app.includes('Premiere') ? '🎬' :
+              app.includes('After Effects') ? '🧪' :
+              app.includes('Illustrator') ? '📐' :
+              app.includes('Resolve') ? '🎥' :
+              app === 'Antigravity' ? '🚀' :
+              app === 'VS Code' ? '💻' :
+              app === 'Chrome' ? '🌐' :
+              app === 'Brave' ? '🦁' : '🖥️'
+            } {app}
           </button>
         ))}
       </div>
@@ -244,21 +302,6 @@ export default function DeepActivity({ day, editorContext, browserContext, onDay
             </Card>
           </div>
 
-          <Card title="⏱️ File Activity Timeline" style={{ marginBottom: 24 }}>
-            <div className="timeline-list">
-              {fileTimeline.map((seg, i) => (
-                <div key={i} className="timeline-row">
-                  <span className="time">{fmtTime(seg.start)}</span>
-                  <div className="content">
-                    <div className="lang-indicator" style={{ background: langColor(seg.lang) }} />
-                    <span className="title">{seg.file}</span>
-                  </div>
-                  <span className="duration">{seg.count * 5 >= 60 ? `${Math.round(seg.count * 5 / 60)}m` : `${seg.count * 5}s`}</span>
-                </div>
-              ))}
-            </div>
-          </Card>
-
           <Card title="📋 Snapshot Log">
             <div className="table-container">
               <table>
@@ -266,8 +309,8 @@ export default function DeepActivity({ day, editorContext, browserContext, onDay
                   <tr>{['Time', 'File', 'Lang', 'Tabs', 'Term', 'Branch', 'Debug'].map(h => <th key={h}>{h}</th>)}</tr>
                 </thead>
                 <tbody>
-                  {appData.slice(-50).reverse().map(snap => (
-                    <tr key={snap.id}>
+                  {appEditorData.slice(-50).reverse().map((snap, i) => (
+                    <tr key={snap.captured_at + i}>
                       <td>{fmtTime(snap.captured_at)}</td>
                       <td style={{ fontWeight: 500 }}>{snap.active_file ?? '—'}</td>
                       <td>{snap.language && <span className="lang-badge" style={{ background: langColor(snap.language) + '22', color: langColor(snap.language) }}>{snap.language}</span>}</td>
@@ -282,7 +325,7 @@ export default function DeepActivity({ day, editorContext, browserContext, onDay
             </div>
           </Card>
         </>
-      ) : (
+      ) : category === 'browser' ? (
         /* --- BROWSER VIEW --- */
         <>
           {browserSummary && (
@@ -336,7 +379,69 @@ export default function DeepActivity({ day, editorContext, browserContext, onDay
               ))}
             </div>
           </Card>
+        </>
+      ) : (
+        /* --- GENERIC APP VIEW --- */
+        <>
+          {genericSummary && (
+            <div className="card grid-3" style={{ marginBottom: 24 }}>
+              <Kpi label="Active Project Count" value={genericSummary.uniqueFiles} />
+              <Kpi label="Total Snapshots" value={genericSummary.totalSnaps} />
+              <Kpi label="Estimated Active Time" value={`${Math.round(genericSummary.totalSnaps * 5 / 60)}m`} />
+            </div>
+          )}
 
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 3fr', gap: 20, marginBottom: 24 }}>
+            <Card title="📂 Most Active Projects" icon="folder" style={{ minWidth: 0 }}>
+              <ResponsiveContainer width="100%" height={260}>
+                <BarChart data={genericFileFreq} layout="vertical" margin={{ left: 8, right: 20 }}>
+                  <XAxis type="number" hide />
+                  <YAxis type="category" dataKey="file" width={140} tick={{ fontSize: 11 }} tickFormatter={v => v.length > 20 ? `…${v.slice(-18)}` : v} />
+                  <Tooltip formatter={(v: number) => [`${Math.round(v / 60)}m`, 'Time']} />
+                  <Bar dataKey="seconds" fill="var(--accent)" radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </Card>
+
+            <Card title="⏱️ App Activity Timeline" icon="globe" style={{ minWidth: 0 }}>
+               <div className="timeline-list">
+              {genericTimeline.map((seg, i) => (
+                <div key={i} className="timeline-row">
+                  <span className="time">{fmtTime(seg.start)}</span>
+                  <div className="content">
+                    <div className="lang-indicator" style={{ background: 'var(--accent)' }} />
+                    <div style={{ overflow: 'hidden' }}>
+                      <span className="sub" style={{ fontSize: 10, textTransform: 'uppercase' }}>{seg.sequence ? `Sequence: ${seg.sequence}` : 'Project'}</span>
+                      <span className="title">{seg.file}</span>
+                    </div>
+                  </div>
+                  <span className="duration">{seg.count * 5 >= 60 ? `${Math.round(seg.count * 5 / 60)}m` : `${seg.count * 5}s`}</span>
+                </div>
+              ))}
+            </div>
+            </Card>
+          </div>
+
+          <Card title="📋 Insight Log">
+            <div className="table-container">
+              <table>
+                <thead>
+                  <tr>{['Time', 'App', 'Project / File', 'Sequence', 'Notes'].map(h => <th key={h}>{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {genericAppData.slice(-50).reverse().map(snap => (
+                    <tr key={snap.id}>
+                      <td>{fmtTime(snap.captured_at)}</td>
+                      <td style={{ fontWeight: 500 }}>{snap.app_name}</td>
+                      <td>{snap.active_file_name || snap.active_file_path || '—'}</td>
+                      <td>{snap.active_sequence || '—'}</td>
+                      <td>{snap.notes || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
         </>
       )}
 
@@ -351,6 +456,7 @@ export default function DeepActivity({ day, editorContext, browserContext, onDay
           background: var(--bg-card); border: 1.5px solid var(--border); color: var(--text-primary);
         }
         .pill-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+        .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
         .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; }
         .grid-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 20px; }
         .timeline-list { display: flex; flex-direction: column; gap: 6px; max-height: 400px; overflow-y: auto; }

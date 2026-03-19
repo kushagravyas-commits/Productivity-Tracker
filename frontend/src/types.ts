@@ -15,7 +15,7 @@ export type TimelineItem = {
   ended_at: string
   app_name: string
   window_title?: string | null
-  productivity_label: 'productive' | 'neutral' | 'distracting'
+  productivity_label: 'productive' | 'neutral' | 'distracting' | 'idle'
 }
 
 export type ProductivityBreakdown = {
