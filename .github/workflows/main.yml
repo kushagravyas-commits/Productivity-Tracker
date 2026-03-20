@@ -1,0 +1,221 @@
+name: Build TrackFlow Installers
+
+# Trigger manually from the GitHub Actions tab
+on:
+  workflow_dispatch:
+
+jobs:
+  # ──────────────────────────────────────────────
+  #  WINDOWS  →  produces TrackFlow Setup .exe
+  # ──────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          pip install pyinstaller
+          pip install -r backend/requirements.txt
+          pip install -r agent/requirements.txt
+
+      - name: Create .env file
+        shell: bash
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGODB_DB: ${{ secrets.MONGODB_DB || 'tracker' }}
+        run: |
+          echo "MONGODB_URI=$MONGODB_URI"                                   > backend/.env
+          echo "MONGODB_DB=$MONGODB_DB"                                    >> backend/.env
+          echo "APP_NAME=TrackFlow"                                        >> backend/.env
+          echo "CORS_ORIGINS=http://localhost:5173,http://localhost:8080"  >> backend/.env
+
+      - name: Build frontend
+        shell: bash
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+          cd ..
+          rm -rf backend/static
+          cp -r frontend/dist backend/static
+
+      - name: Build TrackFlowServer.exe
+        shell: bash
+        run: |
+          cd backend
+          pyinstaller --onefile --noconsole --name=TrackFlowServer \
+            --add-data="static;static" \
+            --add-data=".env;." \
+            --hidden-import=motor \
+            --hidden-import=motor.motor_asyncio \
+            --hidden-import=uvicorn \
+            --hidden-import=uvicorn.logging \
+            --hidden-import=uvicorn.loops \
+            --hidden-import=uvicorn.loops.auto \
+            --hidden-import=uvicorn.protocols \
+            --hidden-import=uvicorn.protocols.http \
+            --hidden-import=uvicorn.protocols.http.auto \
+            --hidden-import=uvicorn.protocols.websockets \
+            --hidden-import=uvicorn.protocols.websockets.auto \
+            --hidden-import=uvicorn.lifespan \
+            --hidden-import=uvicorn.lifespan.on \
+            --hidden-import=dns.resolver \
+            --hidden-import=dns.rdatatype \
+            app/main.py
+          cd ..
+
+      - name: Build TrackFlowAgent.exe
+        shell: bash
+        run: |
+          cd agent
+          pyinstaller --onefile --noconsole --name=TrackFlowAgent \
+            "--add-data=../backend/.env;." \
+            "--add-data=trackflow-context-0.0.1.vsix;." \
+            "--add-data=../chrome-extension;chrome-extension" \
+            --hidden-import=pymongo \
+            --hidden-import=dns.resolver \
+            --hidden-import=dns.rdatatype \
+            collector_windows.py
+          cd ..
+
+      - name: Copy EXEs to dist_bin
+        shell: bash
+        run: |
+          mkdir -p dist_bin
+          cp backend/dist/TrackFlowServer.exe dist_bin/
+          cp agent/dist/TrackFlowAgent.exe    dist_bin/
+
+      - name: Build Electron Windows installer
+        shell: bash
+        run: |
+          cd electron-app
+          npm ci
+          npm run build
+          cd ..
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrackFlow-Windows-Installer
+          path: electron-app/dist/*.exe
+          if-no-files-found: warn
+
+
+  # ──────────────────────────────────────────────
+  #  macOS  →  produces TrackFlow .dmg
+  # ──────────────────────────────────────────────
+  build-mac:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Python dependencies
+        run: |
+          pip install pyinstaller
+          pip install -r backend/requirements.txt
+          pip install -r agent/requirements.txt
+
+      - name: Create .env file
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGODB_DB: ${{ secrets.MONGODB_DB || 'tracker' }}
+        run: |
+          echo "MONGODB_URI=$MONGODB_URI"                                   > backend/.env
+          echo "MONGODB_DB=$MONGODB_DB"                                    >> backend/.env
+          echo "APP_NAME=TrackFlow"                                        >> backend/.env
+          echo "CORS_ORIGINS=http://localhost:5173,http://localhost:8080"  >> backend/.env
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+          cd ..
+          rm -rf backend/static
+          cp -r frontend/dist backend/static
+
+      - name: Build TrackFlowServer (Mac)
+        run: |
+          cd backend
+          pyinstaller --onefile --noconsole --name=TrackFlowServer \
+            --add-data="static:static" \
+            --add-data=".env:." \
+            --hidden-import=motor \
+            --hidden-import=motor.motor_asyncio \
+            --hidden-import=uvicorn \
+            --hidden-import=uvicorn.logging \
+            --hidden-import=uvicorn.loops \
+            --hidden-import=uvicorn.loops.auto \
+            --hidden-import=uvicorn.protocols \
+            --hidden-import=uvicorn.protocols.http \
+            --hidden-import=uvicorn.protocols.http.auto \
+            --hidden-import=uvicorn.protocols.websockets \
+            --hidden-import=uvicorn.protocols.websockets.auto \
+            --hidden-import=uvicorn.lifespan \
+            --hidden-import=uvicorn.lifespan.on \
+            --hidden-import=dns.resolver \
+            --hidden-import=dns.rdatatype \
+            app/main.py
+          cd ..
+
+      - name: Build TrackFlowAgent (Mac)
+        run: |
+          cd agent
+          pyinstaller --onefile --noconsole --name=TrackFlowAgent \
+            "--add-data=../backend/.env:." \
+            "--add-data=trackflow-context-0.0.1.vsix:." \
+            "--add-data=../chrome-extension:chrome-extension" \
+            --hidden-import=pymongo \
+            --hidden-import=dns.resolver \
+            collector_macos.py
+          cd ..
+
+      - name: Copy binaries to electron-mac/bin
+        run: |
+          mkdir -p electron-mac/bin
+          cp backend/dist/TrackFlowServer electron-mac/bin/
+          cp agent/dist/TrackFlowAgent    electron-mac/bin/
+          chmod +x electron-mac/bin/TrackFlowServer
+          chmod +x electron-mac/bin/TrackFlowAgent
+
+      - name: Build Electron Mac DMG
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: |
+          cd electron-mac
+          npm ci
+          npm run build
+          cd ..
+
+      - name: Upload Mac DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrackFlow-Mac-DMG
+          path: electron-mac/dist/*.dmg
+          if-no-files-found: warn
