@@ -5,7 +5,7 @@ a = Analysis(
     ['collector_windows.py'],
     pathex=[],
     binaries=[],
-    datas=[('x:/Varahe Analtics/Productivity-Tracker/backend/.env', '.'), ('trackflow-context-0.0.1.vsix', '.'), ('x:/Varahe Analtics/Productivity-Tracker/chrome-extension', 'chrome-extension')],
+    datas=[('X:\\Varahe Analtics\\Productivity-Tracker\\backend\\.env', '.'), ('trackflow-context-0.0.1.vsix', '.'), ('X:\\Varahe Analtics\\Productivity-Tracker\\chrome-extension', 'chrome-extension')],
     hiddenimports=['pymongo', 'dns.resolver', 'dns.rdatatype'],
     hookspath=[],
     hooksconfig={},
