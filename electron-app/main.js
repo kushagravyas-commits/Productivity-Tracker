@@ -64,6 +64,11 @@ function startServer() {
   serverProcess.on('exit', (code) => {
     console.log(`Server exited with code ${code}`)
     serverProcess = null
+    // Auto-restart if not quitting
+    if (!app.isQuitting) {
+      console.log('Auto-restarting server in 2s...')
+      setTimeout(() => startServer(), 2000)
+    }
   })
 }
 
@@ -77,6 +82,11 @@ function startAgent() {
   agentProcess.on('exit', (code) => {
     console.log(`Agent exited with code ${code}`)
     agentProcess = null
+    // Auto-restart if not quitting
+    if (!app.isQuitting) {
+      console.log('Auto-restarting agent in 2s...')
+      setTimeout(() => startAgent(), 2000)
+    }
   })
 }
 
@@ -183,15 +193,16 @@ function createTray() {
 
 // --- Kill child processes ---
 function killProcesses() {
-  if (serverProcess) {
-    try {
-      process.kill(serverProcess.pid)
-      // Also kill by taskkill to ensure child processes are killed
-      spawn('taskkill', ['/f', '/t', '/pid', String(serverProcess.pid)], { windowsHide: true })
-    } catch (e) { /* ignore */ }
-    serverProcess = null
+  for (const proc of [serverProcess, agentProcess]) {
+    if (proc) {
+      try {
+        process.kill(proc.pid)
+        spawn('taskkill', ['/f', '/t', '/pid', String(proc.pid)], { windowsHide: true })
+      } catch (e) { /* ignore */ }
+    }
   }
-  // Don't kill agent — it should keep running independently
+  serverProcess = null
+  agentProcess = null
 }
 
 // --- App lifecycle ---

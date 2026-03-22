@@ -4,6 +4,7 @@ import type { DashboardResponse, HistoryResponse } from './types'
 const baseURL = ''
 const api = axios.create({
   baseURL,
+  timeout: 30000,
 })
 
 export async function getDashboard(day: string, deviceId?: string): Promise<DashboardResponse> {
@@ -27,23 +28,26 @@ export async function getHistory(day: string, deviceId?: string): Promise<Histor
   return data
 }
 
-export async function getEditorContext(day: string, deviceId?: string): Promise<EditorContextItem[]> {
+export async function getEditorContext(day: string, deviceId?: string, since?: string): Promise<EditorContextItem[]> {
   const params: any = {}
   if (deviceId !== undefined) params.device_id = deviceId
+  if (since) params.since = since
   const { data } = await api.get(`/api/v1/context/editor/${day}`, { params })
   return data
 }
 
-export async function getBrowserContext(day: string, deviceId?: string): Promise<BrowserContextItem[]> {
+export async function getBrowserContext(day: string, deviceId?: string, since?: string): Promise<BrowserContextItem[]> {
   const params: any = {}
   if (deviceId !== undefined) params.device_id = deviceId
+  if (since) params.since = since
   const { data } = await api.get(`/api/v1/context/browser/${day}`, { params })
   return data
 }
 
-export async function getAppContext(day: string, deviceId?: string): Promise<AppContextItem[]> {
+export async function getAppContext(day: string, deviceId?: string, since?: string): Promise<AppContextItem[]> {
   const params: any = {}
   if (deviceId !== undefined) params.device_id = deviceId
+  if (since) params.since = since
   const { data } = await api.get(`/api/v1/context/app/${day}`, { params })
   return data
 }

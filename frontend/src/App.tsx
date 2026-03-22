@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import './styles.css'
 import {
   getDashboard, getEditorContext, getBrowserContext, getAppContext,
@@ -13,7 +13,7 @@ import Users from './pages/Users'
 import AdminActivation from './pages/AdminActivation'
 import type { DashboardResponse } from './types'
 
-const LIVE_REFRESH_MS = 5000
+const LIVE_REFRESH_MS = 15000
 
 function todayString() {
   const now = new Date()
@@ -51,7 +51,13 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
   const [lastUpdated, setLastUpdated] = useState<string>('')
+  const [contextError, setContextError] = useState(false)
   const isToday = day === todayString()
+
+  // Refs for incremental context fetching (track last timestamp per type)
+  const lastEditorTs = useRef<string | null>(null)
+  const lastBrowserTs = useRef<string | null>(null)
+  const lastAppTs = useRef<string | null>(null)
 
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const saved = localStorage.getItem('theme-preference')
@@ -134,21 +140,57 @@ export default function App() {
     // Skip heavy data fetching when on employees page (no device selected)
     if (currentPage === 'employees') return
 
+    // Reset incremental refs on day/device change
+    lastEditorTs.current = null
+    lastBrowserTs.current = null
+    lastAppTs.current = null
+    setContextError(false)
+
     void load(day)
     void loadWeekly(day)
-    void getEditorContext(day, selectedDeviceId).then(setEditorContext).catch(() => {})
-    void getBrowserContext(day, selectedDeviceId).then(setBrowserContext).catch(() => {})
-    void getAppContext(day, selectedDeviceId).then(setAppContext).catch(() => {})
+    void getEditorContext(day, selectedDeviceId).then(data => {
+      setEditorContext(data)
+      if (data.length > 0) lastEditorTs.current = data[data.length - 1].captured_at
+      setContextError(false)
+    }).catch(() => setContextError(true))
+    void getBrowserContext(day, selectedDeviceId).then(data => {
+      setBrowserContext(data)
+      if (data.length > 0) lastBrowserTs.current = data[data.length - 1].captured_at
+      setContextError(false)
+    }).catch(() => setContextError(true))
+    void getAppContext(day, selectedDeviceId).then(data => {
+      setAppContext(data)
+      if (data.length > 0) lastAppTs.current = data[data.length - 1].captured_at
+      setContextError(false)
+    }).catch(() => setContextError(true))
   }, [day, selectedDeviceId, adminStatus?.is_setup, currentPage])
 
   useEffect(() => {
     if (!isToday || !adminStatus?.is_setup || currentPage === 'employees') return undefined
     const id = window.setInterval(() => {
       void load(day, { silent: true })
-      void loadWeekly(day)
-      void getEditorContext(day, selectedDeviceId).then(setEditorContext).catch(() => {})
-      void getBrowserContext(day, selectedDeviceId).then(setBrowserContext).catch(() => {})
-      void getAppContext(day, selectedDeviceId).then(setAppContext).catch(() => {})
+      // Incremental context fetch — only get new snapshots since last fetch
+      void getEditorContext(day, selectedDeviceId, lastEditorTs.current ?? undefined).then(data => {
+        if (data.length > 0) {
+          lastEditorTs.current = data[data.length - 1].captured_at
+          setEditorContext(prev => [...prev, ...data])
+        }
+        setContextError(false)
+      }).catch(() => setContextError(true))
+      void getBrowserContext(day, selectedDeviceId, lastBrowserTs.current ?? undefined).then(data => {
+        if (data.length > 0) {
+          lastBrowserTs.current = data[data.length - 1].captured_at
+          setBrowserContext(prev => [...prev, ...data])
+        }
+        setContextError(false)
+      }).catch(() => setContextError(true))
+      void getAppContext(day, selectedDeviceId, lastAppTs.current ?? undefined).then(data => {
+        if (data.length > 0) {
+          lastAppTs.current = data[data.length - 1].captured_at
+          setAppContext(prev => [...prev, ...data])
+        }
+        setContextError(false)
+      }).catch(() => setContextError(true))
     }, LIVE_REFRESH_MS)
     return () => window.clearInterval(id)
   }, [day, isToday, selectedDeviceId, adminStatus?.is_setup, currentPage])
@@ -166,13 +208,26 @@ export default function App() {
 
   async function handleRefresh() {
     setLoading(true)
+    // Reset incremental refs — force full reload
+    lastEditorTs.current = null
+    lastBrowserTs.current = null
+    lastAppTs.current = null
     try {
       await Promise.all([
         load(day, { silent: true }),
         loadWeekly(day),
-        getEditorContext(day, selectedDeviceId).then(setEditorContext).catch(() => {}),
-        getBrowserContext(day, selectedDeviceId).then(setBrowserContext).catch(() => {}),
-        getAppContext(day, selectedDeviceId).then(setAppContext).catch(() => {}),
+        getEditorContext(day, selectedDeviceId).then(data => {
+          setEditorContext(data)
+          if (data.length > 0) lastEditorTs.current = data[data.length - 1].captured_at
+        }).catch(() => setContextError(true)),
+        getBrowserContext(day, selectedDeviceId).then(data => {
+          setBrowserContext(data)
+          if (data.length > 0) lastBrowserTs.current = data[data.length - 1].captured_at
+        }).catch(() => setContextError(true)),
+        getAppContext(day, selectedDeviceId).then(data => {
+          setAppContext(data)
+          if (data.length > 0) lastAppTs.current = data[data.length - 1].captured_at
+        }).catch(() => setContextError(true)),
       ])
       setLastUpdated(new Date().toLocaleTimeString())
     } finally {
@@ -254,6 +309,7 @@ export default function App() {
             browserContext={browserContext}
             appContext={appContext}
             loading={loading}
+            contextError={contextError}
             onDayChange={setDay}
             onLoadToday={handleLoadToday}
             onRefresh={handleRefresh}

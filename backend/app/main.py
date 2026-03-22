@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 
 from app.db import get_connection, init_db
 from app.mongo_db import mongodb
+from app import neon_db
 from app.schemas import (
     DashboardResponse,
     EditorContextIn,
@@ -70,6 +71,22 @@ ALLOWED_ADMIN_EMAILS = [
 
 APP_NAME = os.getenv("APP_NAME", "TrackFlow")
 
+# ---------------------------------------------------------------------------
+# Simple in-memory TTL cache for read-heavy endpoints
+# ---------------------------------------------------------------------------
+from time import time as _now
+
+_cache: dict[str, tuple[float, object]] = {}
+
+def cache_get(key: str, ttl: float) -> object | None:
+    entry = _cache.get(key)
+    if entry and _now() - entry[0] < ttl:
+        return entry[1]
+    return None
+
+def cache_set(key: str, value: object) -> None:
+    _cache[key] = (_now(), value)
+
 def naive_day_range(day: date) -> tuple[datetime, datetime]:
     """Return (start, end) as naive datetimes for a given date."""
     return datetime.combine(day, datetime.min.time()), datetime.combine(day, datetime.max.time())
@@ -89,25 +106,43 @@ def parse_local_time(val) -> datetime:
     return val
 
 def device_filter(device_id: str | None) -> dict:
-    """Build a MongoDB filter that matches on either device_id, machine_guid,
-    or records with no device_id (legacy data stored before proxy set it)."""
+    """Build a MongoDB filter for device_id. Legacy data is normalized at startup."""
     if device_id is None:
         return {}
-    return {"$or": [
-        {"device_id": device_id},
-        {"machine_guid": device_id},
-        {"device_id": None},
-        {"device_id": {"$exists": False}},
-    ]}
+    return {"device_id": device_id}
 origins = [item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",") if item.strip()]
+
+async def _normalize_device_ids():
+    """One-time migration: copy machine_guid into device_id for legacy records."""
+    collections = ["events", "idle_periods", "editor_context", "browser_context", "app_context"]
+    for coll_name in collections:
+        coll = mongodb.db[coll_name]
+        # Records where device_id is null but machine_guid exists
+        res1 = await coll.update_many(
+            {"device_id": None, "machine_guid": {"$exists": True, "$ne": None}},
+            [{"$set": {"device_id": "$machine_guid"}}]
+        )
+        # Records where device_id field doesn't exist but machine_guid does
+        res2 = await coll.update_many(
+            {"device_id": {"$exists": False}, "machine_guid": {"$exists": True, "$ne": None}},
+            [{"$set": {"device_id": "$machine_guid"}}]
+        )
+        total = res1.modified_count + res2.modified_count
+        if total > 0:
+            print(f"Normalized {total} legacy records in {coll_name}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
     # Initialize SQL for legacy/fallback if needed, but primarily MongoDB
     init_db()
     await mongodb.connect()
     await mongodb.ensure_indexes()
+    await neon_db.init_neon()
+    # Run migration in background — don't block server startup
+    asyncio.get_event_loop().create_task(_normalize_device_ids())
     yield
+    await neon_db.close_neon()
     await mongodb.close()
 
 app = FastAPI(title="TrackFlow API", lifespan=lifespan)
@@ -461,6 +496,13 @@ async def dashboard_today(device_id: str | None = Query(None)) -> DashboardRespo
 
 @app.get("/api/v1/dashboard/{day}", response_model=DashboardResponse)
 async def dashboard(day: date, device_id: str | None = Query(None)) -> DashboardResponse:
+    # Cache: past days are immutable (24h TTL), today refreshes every 10s
+    cache_key = f"dashboard:{day}:{device_id}"
+    ttl = 10 if day == date.today() else 86400
+    cached = cache_get(cache_key, ttl)
+    if cached is not None:
+        return cached
+
     start_dt, end_dt = naive_day_range(day)
 
     query: dict = {"started_at": {"$gte": start_dt, "$lte": end_dt}}
@@ -478,7 +520,7 @@ async def dashboard(day: date, device_id: str | None = Query(None)) -> Dashboard
             for row in day_idle
         )
 
-        return DashboardResponse(
+        result = DashboardResponse(
             day=day,
             kpis=build_kpis(day_events, idle_seconds),
             top_apps=build_top_app_items(day_events),
@@ -486,6 +528,8 @@ async def dashboard(day: date, device_id: str | None = Query(None)) -> Dashboard
             productivity_breakdown=build_productivity_breakdown(day_events, idle_seconds),
             summary=summarize_day(day_events, idle_seconds),
         )
+        cache_set(cache_key, result)
+        return result
     except Exception as exc:
         print(f"Dashboard error for {day}: {exc}")
         return DashboardResponse(
@@ -559,53 +603,66 @@ async def list_events(
 @app.post("/api/v1/context/editor", response_model=MessageResponse, tags=["editor"])
 async def post_editor_context(payload: EditorContextIn, device_id: str | None = Depends(get_device_id)) -> MessageResponse:
     """Receive an editor context snapshot (files, git, etc.) from VS Code."""
-    new_snapshot = payload.model_dump()
-    new_snapshot["device_id"] = device_id
-    new_snapshot["machine_guid"] = device_id
-    raw = new_snapshot["captured_at"]
-    dt = parse_local_time(raw)
-    new_snapshot["captured_at"] = dt
-    new_snapshot["captured_at_str"] = dt.strftime("%Y-%m-%dT%H:%M:%S")
-    await mongodb.db.editor_context.insert_one(new_snapshot)
+    doc = payload.model_dump()
+    doc["device_id"] = device_id
+    doc["machine_guid"] = device_id
+    doc["captured_at"] = parse_local_time(doc["captured_at"])
+    await neon_db.insert_editor_context(doc)
     return MessageResponse(message="ok")
 
 
 @app.get("/api/v1/context/editor/{day}", response_model=list[EditorContextItem], tags=["editor"])
-async def get_editor_context(day: str, device_id: str | None = Query(None)) -> list[EditorContextItem]:
-    """Return all editor context snapshots for a given day (YYYY-MM-DD) in IST."""
+async def get_editor_context(
+    day: str,
+    device_id: str | None = Query(None),
+    since: str | None = Query(None),
+    limit: int = Query(500, le=5000),
+) -> list[EditorContextItem]:
+    """Return editor context snapshots for a given day (YYYY-MM-DD).
+    Pass ?since=ISO_TIMESTAMP to get only newer records (incremental fetch)."""
     try:
         target = date.fromisoformat(day)
     except ValueError:
         raise HTTPException(status_code=400, detail="day must be YYYY-MM-DD")
 
-    start_dt, end_dt = naive_day_range(target)
-    
-    query: dict = {"captured_at": {"$gte": start_dt, "$lte": end_dt}}
-    query.update(device_filter(device_id))
+    # Cache (skip if incremental fetch)
+    if not since:
+        cache_key = f"editor:{day}:{device_id}:{limit}"
+        ttl = 10 if target == date.today() else 86400
+        cached = cache_get(cache_key, ttl)
+        if cached is not None:
+            return cached
+
+    since_dt: datetime | None = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since)
+        except ValueError:
+            pass
 
     try:
-        cursor = mongodb.db.editor_context.find(query).sort("captured_at", 1)
-        rows = await cursor.to_list(length=5000)
-
+        rows = await neon_db.query_context("editor_context", target, device_id, since_dt, limit)
         items = []
         for i, r in enumerate(rows):
             try:
                 items.append(EditorContextItem(
                     id=i,
-                    captured_at=r["captured_at"].strftime("%Y-%m-%dT%H:%M:%S") if isinstance(r["captured_at"], datetime) else str(r["captured_at"]),
-                    editor_app=r.get("editor_app") or "Unknown",
-                    workspace=r.get("workspace"),
-                    active_file=r.get("active_file"),
-                    active_file_path=r.get("active_file_path"),
-                    language=r.get("language"),
-                    open_files=r.get("open_files") or [],
-                    terminal_count=r.get("terminal_count") or 0,
-                    git_branch=r.get("git_branch"),
-                    debugger_active=bool(r.get("debugger_active")),
+                    captured_at=r["captured_at"].strftime("%Y-%m-%dT%H:%M:%S"),
+                    editor_app=r["editor_app"] or "Unknown",
+                    workspace=r["workspace"],
+                    active_file=r["active_file"],
+                    active_file_path=r["active_file_path"],
+                    language=r["language"],
+                    open_files=list(r["open_files"] or []),
+                    terminal_count=r["terminal_count"] or 0,
+                    git_branch=r["git_branch"],
+                    debugger_active=bool(r["debugger_active"]),
                 ))
             except Exception as e:
                 print(f"Error parsing editor context row: {e}")
                 continue
+        if not since:
+            cache_set(cache_key, items)
         return items
     except Exception as exc:
         print(f"Error fetching editor context for {day}: {exc}")
@@ -619,56 +676,73 @@ async def get_editor_context(day: str, device_id: str | None = Query(None)) -> l
 @app.post("/api/v1/context/browser", response_model=MessageResponse, tags=["browser"])
 async def post_browser_context(payload: BrowserContextIn, device_id: str | None = Depends(get_device_id)) -> MessageResponse:
     """Receive a browser context snapshot (tabs, YouTube, etc.) from extension."""
-    new_snapshot = payload.model_dump()
-    new_snapshot["device_id"] = device_id
-    new_snapshot["machine_guid"] = device_id
-    raw = new_snapshot["captured_at"]
-    dt = parse_local_time(raw)
-    new_snapshot["captured_at"] = dt
-    new_snapshot["captured_at_str"] = dt.strftime("%Y-%m-%dT%H:%M:%S")
-    await mongodb.db.browser_context.insert_one(new_snapshot)
+    from app.services.classifier import classifier as _browser_classifier
+    doc = payload.model_dump()
+    doc["device_id"] = device_id
+    doc["machine_guid"] = device_id
+    doc["captured_at"] = parse_local_time(doc["captured_at"])
+    doc["productivity_label"] = _browser_classifier.classify(
+        doc.get("active_tab_title", ""),
+        doc.get("active_tab_domain", "")
+    )
+    await neon_db.insert_browser_context(doc)
     return MessageResponse(message="ok")
 
 
 @app.get("/api/v1/context/browser/{day}", response_model=list[BrowserContextItem], tags=["browser"])
-async def get_browser_context(day: str, device_id: str | None = Query(None)) -> list[BrowserContextItem]:
-    """Return all browser context snapshots for a given day (YYYY-MM-DD) in IST."""
+async def get_browser_context(
+    day: str,
+    device_id: str | None = Query(None),
+    since: str | None = Query(None),
+    limit: int = Query(500, le=5000),
+) -> list[BrowserContextItem]:
+    """Return browser context snapshots for a given day (YYYY-MM-DD).
+    Pass ?since=ISO_TIMESTAMP to get only newer records (incremental fetch)."""
     try:
         target = date.fromisoformat(day)
     except ValueError:
         raise HTTPException(status_code=400, detail="day must be YYYY-MM-DD")
 
-    start_dt, end_dt = naive_day_range(target)
-    
-    query: dict = {"captured_at": {"$gte": start_dt, "$lte": end_dt}}
-    query.update(device_filter(device_id))
+    # Cache (skip if incremental fetch)
+    if not since:
+        cache_key = f"browser:{day}:{device_id}:{limit}"
+        ttl = 10 if target == date.today() else 86400
+        cached = cache_get(cache_key, ttl)
+        if cached is not None:
+            return cached
+
+    since_dt: datetime | None = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since)
+        except ValueError:
+            pass
 
     try:
-        cursor = mongodb.db.browser_context.find(query).sort("captured_at", 1)
-        rows = await cursor.to_list(length=5000)
-
-        from app.services.classifier import classifier
+        rows = await neon_db.query_context("browser_context", target, device_id, since_dt, limit)
         items = []
         for i, r in enumerate(rows):
             try:
                 items.append(BrowserContextItem(
                     id=i,
-                    captured_at=r["captured_at"].strftime("%Y-%m-%dT%H:%M:%S") if isinstance(r["captured_at"], datetime) else str(r["captured_at"]),
-                    browser_app=r.get("browser_app") or "Unknown",
-                    active_tab_url=r.get("active_tab_url"),
-                    active_tab_title=r.get("active_tab_title"),
-                    active_tab_domain=r.get("active_tab_domain"),
-                    tab_count=r.get("tab_count") or 0,
-                    open_domains=r.get("open_domains") or [],
-                    youtube_video_title=r.get("youtube_video_title"),
-                    youtube_channel=r.get("youtube_channel"),
-                    youtube_is_playing=bool(r.get("youtube_is_playing")) if r.get("youtube_is_playing") is not None else None,
-                    youtube_progress_pct=r.get("youtube_progress_pct"),
-                    productivity_label=classifier.classify(r.get("active_tab_title", ""), r.get("active_tab_domain", ""))
+                    captured_at=r["captured_at"].strftime("%Y-%m-%dT%H:%M:%S"),
+                    browser_app=r["browser_app"] or "Unknown",
+                    active_tab_url=r["active_tab_url"],
+                    active_tab_title=r["active_tab_title"],
+                    active_tab_domain=r["active_tab_domain"],
+                    tab_count=r["tab_count"] or 0,
+                    open_domains=list(r["open_domains"] or []),
+                    youtube_video_title=r["youtube_video_title"],
+                    youtube_channel=r["youtube_channel"],
+                    youtube_is_playing=r["youtube_is_playing"],
+                    youtube_progress_pct=r["youtube_progress_pct"],
+                    productivity_label=r["productivity_label"] or "neutral",
                 ))
             except Exception as e:
                 print(f"Error parsing browser context row: {e}")
                 continue
+        if not since:
+            cache_set(cache_key, items)
         return items
     except Exception as exc:
         print(f"Error fetching browser context for {day}: {exc}")
@@ -677,47 +751,60 @@ async def get_browser_context(day: str, device_id: str | None = Query(None)) -> 
 @app.post("/api/v1/context/app", response_model=MessageResponse, tags=["app"])
 async def post_app_context(payload: AppContextIn, device_id: str | None = Depends(get_device_id)) -> MessageResponse:
     """Receive a generic application context snapshot (Adobe, DaVinci, etc.)."""
-    new_snapshot = payload.model_dump()
-    new_snapshot["device_id"] = device_id
-    new_snapshot["machine_guid"] = device_id
-    raw = new_snapshot["captured_at"]
-    dt = parse_local_time(raw)
-    new_snapshot["captured_at"] = dt
-    new_snapshot["captured_at_str"] = dt.strftime("%Y-%m-%dT%H:%M:%S")
-    await mongodb.db.app_context.insert_one(new_snapshot)
+    doc = payload.model_dump()
+    doc["device_id"] = device_id
+    doc["machine_guid"] = device_id
+    doc["captured_at"] = parse_local_time(doc["captured_at"])
+    await neon_db.insert_app_context(doc)
     return MessageResponse(message="ok")
 @app.get("/api/v1/context/app/{day}", response_model=list[AppContextItem], tags=["app"])
-async def get_app_context(day: str, device_id: str | None = Query(None)) -> list[AppContextItem]:
-    """Return all application context snapshots for a given day (YYYY-MM-DD) in IST."""
+async def get_app_context(
+    day: str,
+    device_id: str | None = Query(None),
+    since: str | None = Query(None),
+    limit: int = Query(500, le=5000),
+) -> list[AppContextItem]:
+    """Return application context snapshots for a given day (YYYY-MM-DD).
+    Pass ?since=ISO_TIMESTAMP to get only newer records (incremental fetch)."""
     try:
         target = date.fromisoformat(day)
     except ValueError:
         raise HTTPException(status_code=400, detail="day must be YYYY-MM-DD")
 
-    start_dt, end_dt = naive_day_range(target)
-    
-    query: dict = {"captured_at": {"$gte": start_dt, "$lte": end_dt}}
-    query.update(device_filter(device_id))
+    # Cache (skip if incremental fetch)
+    if not since:
+        cache_key = f"app:{day}:{device_id}:{limit}"
+        ttl = 10 if target == date.today() else 86400
+        cached = cache_get(cache_key, ttl)
+        if cached is not None:
+            return cached
+
+    since_dt: datetime | None = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since)
+        except ValueError:
+            pass
 
     try:
-        cursor = mongodb.db.app_context.find(query).sort("captured_at", 1)
-        rows = await cursor.to_list(length=5000)
-
+        rows = await neon_db.query_context("app_context", target, device_id, since_dt, limit)
         items = []
         for i, r in enumerate(rows):
             try:
                 items.append(AppContextItem(
                     id=i,
-                    captured_at=r["captured_at"].strftime("%Y-%m-%dT%H:%M:%S") if isinstance(r["captured_at"], datetime) else str(r["captured_at"]),
-                    app_name=r.get("app_name") or "Unknown",
-                    active_file_name=r.get("active_file_name"),
-                    active_file_path=r.get("active_file_path"),
-                    active_sequence=r.get("active_sequence"),
-                    notes=r.get("notes"),
+                    captured_at=r["captured_at"].strftime("%Y-%m-%dT%H:%M:%S"),
+                    app_name=r["app_name"] or "Unknown",
+                    active_file_name=r["active_file_name"],
+                    active_file_path=r["active_file_path"],
+                    active_sequence=r["active_sequence"],
+                    notes=r["notes"],
                 ))
             except Exception as e:
                 print(f"Error parsing app context row: {e}")
                 continue
+        if not since:
+            cache_set(cache_key, items)
         return items
     except Exception as exc:
         print(f"Error fetching app context for {day}: {exc}")

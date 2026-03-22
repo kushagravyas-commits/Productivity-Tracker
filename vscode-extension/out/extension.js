@@ -54,6 +54,7 @@ function getMachineGuid() {
     return vscode.env.machineId; // VS Code's own unique ID as fallback
 }
 let timer;
+let _lastFailedPayload = null;
 async function getGitBranch() {
     // Try multiple IDs — 'vscode.git' is standard; forks like Antigravity may differ
     const ids = ['vscode.git', 'git', 'antigravity.git', 'cursor.git'];
@@ -101,7 +102,13 @@ function getOpenFiles() {
 }
 async function collectAndSend() {
     const config = vscode.workspace.getConfiguration('trackflow');
-    const apiUrl = config.get('apiUrl') ?? 'http://127.0.0.1:10101';
+    const apiUrl = config.get('apiUrl') ?? 'http://127.0.0.1:8080';
+    // Retry last failed payload before collecting new one
+    if (_lastFailedPayload) {
+        const retry = _lastFailedPayload;
+        _lastFailedPayload = null;
+        sendPayload(retry.apiUrl, retry.context, true);
+    }
     const editor = vscode.window.activeTextEditor;
     const activeFile = editor ? path.basename(editor.document.fileName) : null;
     const activeFilePath = editor ? editor.document.fileName : null;
@@ -124,7 +131,7 @@ async function collectAndSend() {
     };
     sendPayload(apiUrl, context);
 }
-function sendPayload(apiUrl, context) {
+function sendPayload(apiUrl, context, isRetry = false) {
     try {
         const body = JSON.stringify(context);
         const url = new URL('/api/v1/context/editor', apiUrl);
@@ -133,6 +140,7 @@ function sendPayload(apiUrl, context) {
             port: parseInt(url.port) || 10101,
             path: url.pathname,
             method: 'POST',
+            timeout: 5000,
             headers: {
                 'Content-Type': 'application/json',
                 'Content-Length': Buffer.byteLength(body),
@@ -140,7 +148,19 @@ function sendPayload(apiUrl, context) {
             },
         };
         const req = http.request(options);
-        req.on('error', () => { });
+        req.setTimeout(5000, () => {
+            req.destroy();
+        });
+        req.on('error', () => {
+            // Queue for retry on next tick (only if this isn't already a retry)
+            if (!isRetry) {
+                _lastFailedPayload = { apiUrl, context };
+            }
+        });
+        req.on('response', () => {
+            // Success — clear retry buffer
+            _lastFailedPayload = null;
+        });
         req.write(body);
         req.end();
     }

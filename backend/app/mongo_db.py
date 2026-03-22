@@ -25,9 +25,9 @@ class MongoDB:
         if cls.client is None:
             cls.client = AsyncIOMotorClient(
                 MONGODB_URI,
-                serverSelectionTimeoutMS=30000,
-                connectTimeoutMS=30000,
-                socketTimeoutMS=60000,
+                serverSelectionTimeoutMS=10000,
+                connectTimeoutMS=10000,
+                socketTimeoutMS=15000,
                 maxPoolSize=50,
             )
             cls.db = cls.client[MONGODB_DB]
@@ -36,7 +36,9 @@ class MongoDB:
 
     @classmethod
     async def ensure_indexes(cls):
-        """Create indexes for fast queries on all collections."""
+        """Create indexes for fast queries on all collections.
+        Primary query pattern: {device_id: X, started_at/captured_at: {$gte, $lte}}
+        The compound index covers both filtered and unfiltered date-range queries."""
         try:
             # Users
             await cls.db.users.create_index("email", unique=True)
@@ -46,28 +48,20 @@ class MongoDB:
             await cls.db.devices.create_index("machine_guid", unique=True)
             await cls.db.devices.create_index("email")
 
-            # Events — queried by (device_id, started_at) and also by started_at alone
+            # Events — compound index for (device_id + date range) queries
             await cls.db.events.create_index([("device_id", 1), ("started_at", 1)])
-            await cls.db.events.create_index("started_at")
 
-            # Idle periods — same pattern
+            # Idle periods
             await cls.db.idle_periods.create_index([("device_id", 1), ("started_at", 1)])
-            await cls.db.idle_periods.create_index("started_at")
 
-            # Editor context — queried by (device_id, captured_at) and captured_at alone
+            # Editor context
             await cls.db.editor_context.create_index([("device_id", 1), ("captured_at", 1)])
-            await cls.db.editor_context.create_index("captured_at")
-            await cls.db.editor_context.create_index([("machine_guid", 1), ("captured_at", 1)])
 
-            # Browser context — same pattern
+            # Browser context
             await cls.db.browser_context.create_index([("device_id", 1), ("captured_at", 1)])
-            await cls.db.browser_context.create_index("captured_at")
-            await cls.db.browser_context.create_index([("machine_guid", 1), ("captured_at", 1)])
 
-            # App context — same pattern
+            # App context
             await cls.db.app_context.create_index([("device_id", 1), ("captured_at", 1)])
-            await cls.db.app_context.create_index("captured_at")
-            await cls.db.app_context.create_index([("machine_guid", 1), ("captured_at", 1)])
 
             print("MongoDB indexes ensured.")
         except Exception as e:

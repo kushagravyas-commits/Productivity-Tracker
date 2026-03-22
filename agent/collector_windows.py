@@ -295,43 +295,70 @@ class LocalProxyHandler(BaseHTTPRequestHandler):
                     except:
                         pass
 
-            # Fast path: direct MongoDB insert
-            if self.tracker and self.tracker.db is not None:
-                self.tracker.db[collection_name].insert_one(payload)
+            # Build fallback payload NOW — before insert_one() can mutate the dict with _id
+            # Use a custom serializer so datetimes and any stray ObjectIds are safely encoded
+            def _proxy_json_default(obj):
+                if isinstance(obj, datetime):
+                    return obj.strftime("%Y-%m-%dT%H:%M:%S")
+                return str(obj)  # handles ObjectId, bytes, and any other non-serializable type
+
+            fallback_body = json.dumps(payload, default=_proxy_json_default).encode()
+
+            def _send_ok():
                 self.send_response(200)
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({"message": "proxied to mongodb"}).encode())
-            else:
-                # Fallback: forward to backend API at port 8080
+
+            def _send_response_safe(status, content=None):
                 try:
-                    # datetime objects can't be JSON-serialized — convert back to ISO strings
-                    fallback_payload = {
-                        k: v.strftime("%Y-%m-%dT%H:%M:%S") if isinstance(v, datetime) else v
-                        for k, v in payload.items()
-                    }
-                    resp = requests.post(
-                        f"http://127.0.0.1:8080{path}",
-                        json=fallback_payload,
-                        headers={"X-Machine-GUID": machine_guid, "Content-Type": "application/json"},
-                        timeout=5
-                    )
-                    self.send_response(resp.status_code)
+                    self.send_response(status)
                     self.send_header('Access-Control-Allow-Origin', '*')
                     self.send_header('Content-Type', 'application/json')
                     self.end_headers()
-                    self.wfile.write(resp.content)
-                except Exception as fwd_err:
-                    print(f"Proxy fallback error: {fwd_err}")
-                    self.send_response(502)
-                    self.send_header('Access-Control-Allow-Origin', '*')
-                    self.end_headers()
+                    if content:
+                        self.wfile.write(content)
+                except OSError:
+                    pass  # Client disconnected — socket errors on Windows are all OSError
+
+            # Fast path: direct MongoDB insert
+            if self.tracker and self.tracker.db is not None:
+                try:
+                    self.tracker.db[collection_name].insert_one(payload)
+                    try:
+                        _send_ok()
+                    except OSError:
+                        pass  # Client timed out — data was saved to MongoDB, ignore
+                    return
+                except Exception as mongo_err:
+                    print(f"MongoDB insert failed, falling back to API: {mongo_err}")
+                    # Mark connection as dead so health check reconnects
+                    self.tracker.db = None
+                    self.tracker.client = None
+
+            # Fallback: forward to backend API at port 8080 using pre-built JSON body
+            try:
+                resp = requests.post(
+                    f"http://127.0.0.1:8080{path}",
+                    data=fallback_body,
+                    headers={"X-Machine-GUID": machine_guid, "Content-Type": "application/json"},
+                    timeout=5
+                )
+                _send_response_safe(resp.status_code, resp.content)
+            except Exception as fwd_err:
+                print(f"Proxy fallback error: {fwd_err}")
+                _send_response_safe(502)
+        except OSError:
+            pass  # Client disconnected — all Windows socket errors are OSError subclasses
         except Exception as e:
             print(f"Proxy error: {e}")
-            self.send_response(500)
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
+            try:
+                self.send_response(500)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+            except OSError:
+                pass
 
     def log_message(self, format, *args):
         # Suppress logging for every request
@@ -435,11 +462,20 @@ class WindowsTracker:
             print("Warning: MONGODB_URI not found. Agent will not be able to write directly.")
             return
         try:
-            self.client = MongoClient(self.mongodb_uri)
+            self.client = MongoClient(
+                self.mongodb_uri,
+                serverSelectionTimeoutMS=5000,
+                connectTimeoutMS=5000,
+                socketTimeoutMS=10000,
+            )
+            # Verify connection is actually alive
+            self.client.admin.command('ping')
             self.db = self.client[self.mongodb_db_name]
             print(f"Connected to MongoDB: {self.mongodb_db_name}")
         except Exception as e:
             print(f"Error connecting to MongoDB: {e}")
+            self.client = None
+            self.db = None
 
     def start_proxy(self):
         LocalProxyHandler.tracker = self
@@ -784,6 +820,7 @@ class WindowsTracker:
 
     def run(self) -> None:
         self._register_signal_handlers()
+        self._last_health_check = time.time()
         print(
             f"Starting Windows tracker. API={API_BASE_URL} poll={POLL_SECONDS}s "
             f"idle_threshold={IDLE_THRESHOLD_SECONDS}s max_segment={MAX_SEGMENT_SECONDS}s"
@@ -791,6 +828,16 @@ class WindowsTracker:
         print(f"Rules file: {RULES_PATH}")
 
         while self.running:
+            # Periodic MongoDB health check (every 60 seconds)
+            if self.db is not None and time.time() - self._last_health_check > 60:
+                self._last_health_check = time.time()
+                try:
+                    self.client.admin.command('ping')
+                except Exception as e:
+                    print(f"MongoDB health check failed, will reconnect: {e}")
+                    self.db = None
+                    self.client = None
+
             # If not connected to MongoDB, keep trying to register/discover
             if self.db is None:
                 self.perform_registration()
@@ -978,11 +1025,27 @@ class WindowsTracker:
                     f"Event saved to MongoDB: {snapshot.app_name} | {snapshot.productivity_label} | "
                     f"{started_at.strftime('%H:%M:%S')} -> {ended_at.strftime('%H:%M:%S')}"
                 )
+                return
             except Exception as e:
-                print(f"Error saving event to MongoDB: {e}")
-        else:
-            # Fallback to API if DB not connected (optional, but requested to "replace")
-            print("Warning: MongoDB not connected, cannot save event.")
+                print(f"MongoDB event insert failed, marking for reconnect: {e}")
+                self.db = None
+                self.client = None
+
+        # Fallback: send via API
+        try:
+            fallback_payload = {
+                k: v.strftime("%Y-%m-%dT%H:%M:%S") if isinstance(v, datetime) else v
+                for k, v in payload.items()
+            }
+            self.session.post(
+                "http://127.0.0.1:8080/api/v1/events",
+                json=fallback_payload,
+                headers={"X-Machine-GUID": self.machine_guid, "Content-Type": "application/json"},
+                timeout=5
+            )
+            print(f"Event saved via API fallback: {snapshot.app_name}")
+        except Exception as fwd_err:
+            print(f"Warning: Could not save event (MongoDB down, API fallback failed): {fwd_err}")
 
     def post_idle_period(self, started_at: datetime, ended_at: datetime) -> None:
         if ended_at <= started_at:
@@ -998,10 +1061,27 @@ class WindowsTracker:
             try:
                 self.db.idle_periods.insert_one(payload)
                 print(f"Idle period saved to MongoDB: {started_at.strftime('%H:%M:%S')} -> {ended_at.strftime('%H:%M:%S')}")
+                return
             except Exception as e:
-                print(f"Error saving idle period to MongoDB: {e}")
-        else:
-            print("Warning: MongoDB not connected, cannot save idle period.")
+                print(f"MongoDB idle insert failed, marking for reconnect: {e}")
+                self.db = None
+                self.client = None
+
+        # Fallback: send via API
+        try:
+            fallback_payload = {
+                k: v.strftime("%Y-%m-%dT%H:%M:%S") if isinstance(v, datetime) else v
+                for k, v in payload.items()
+            }
+            self.session.post(
+                "http://127.0.0.1:8080/api/v1/idle",
+                json=fallback_payload,
+                headers={"X-Machine-GUID": self.machine_guid, "Content-Type": "application/json"},
+                timeout=5
+            )
+            print(f"Idle period saved via API fallback")
+        except Exception as fwd_err:
+            print(f"Warning: Could not save idle period (MongoDB down, API fallback failed): {fwd_err}")
 
 
 if __name__ == "__main__":

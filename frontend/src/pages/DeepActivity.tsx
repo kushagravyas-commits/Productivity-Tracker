@@ -44,6 +44,7 @@ interface DeepActivityProps {
   browserContext: BrowserContextItem[]
   appContext: AppContextItem[]
   loading?: boolean
+  contextError?: boolean
   onDayChange: (day: string) => void
   onLoadToday: () => void
   onRefresh: () => void
@@ -51,7 +52,7 @@ interface DeepActivityProps {
 
 type ActivityCategory = 'editor' | 'browser' | 'app'
 
-export default function DeepActivity({ day, editorContext, browserContext, appContext, loading, onDayChange, onLoadToday, onRefresh }: DeepActivityProps) {
+export default function DeepActivity({ day, editorContext, browserContext, appContext, loading, contextError, onDayChange, onLoadToday, onRefresh }: DeepActivityProps) {
   const isToday = day === todayString()
   const [category, setCategory] = useState<ActivityCategory>('editor')
   const [userPickedCategory, setUserPickedCategory] = useState(false)
@@ -258,6 +259,12 @@ export default function DeepActivity({ day, editorContext, browserContext, appCo
           </button>
         ))}
       </div>
+
+      {contextError && (
+        <div style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 8, padding: '10px 16px', marginBottom: 16, fontSize: 13, color: 'var(--text-primary)' }}>
+          Unable to fetch latest deep activity data. Retrying automatically...
+        </div>
+      )}
 
       {!hasData ? (
         <div className="notice notice-info" style={{ marginTop: 40, textAlign: 'center', padding: '60px 24px' }}>

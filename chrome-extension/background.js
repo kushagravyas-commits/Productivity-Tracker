@@ -1,8 +1,11 @@
 // TrackFlow Browser Context — Background Service Worker
 // Polls active tab + all tabs every 5s and sends to local backend
 
-const API_URL = 'http://127.0.0.1:10101/api/v1/context/browser';
+const API_URL = 'http://127.0.0.1:8080/api/v1/context/browser';
 const INTERVAL_MS = 5000;
+const FETCH_TIMEOUT_MS = 5000;
+const MAX_RETRY_QUEUE = 50;
+const _retryQueue = [];
 
 // Stable machine ID — generated once, stored in chrome.storage.local
 let machineGuid = null;
@@ -41,6 +44,33 @@ function extractDomain(url) {
     return new URL(url).hostname.replace(/^www\./, '');
   } catch {
     return null;
+  }
+}
+
+async function fetchWithTimeout(url, headers, body) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers,
+      body,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function flushRetryQueue(headers) {
+  while (_retryQueue.length > 0) {
+    const item = _retryQueue[0];
+    try {
+      await fetchWithTimeout(API_URL, headers, item);
+      _retryQueue.shift(); // success — remove from queue
+    } catch {
+      break; // server still down — stop retrying
+    }
   }
 }
 
@@ -86,13 +116,23 @@ async function collectAndSend() {
       headers['X-Machine-GUID'] = machineGuid;
     }
 
-    await fetch(API_URL, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-    });
+    const body = JSON.stringify(payload);
+
+    // Flush any queued payloads first
+    await flushRetryQueue(headers);
+
+    // Send current payload
+    try {
+      await fetchWithTimeout(API_URL, headers, body);
+    } catch (sendErr) {
+      // Queue for retry on next poll
+      if (_retryQueue.length < MAX_RETRY_QUEUE) {
+        _retryQueue.push(body);
+      }
+      console.warn('[TrackFlow] Send failed, queued for retry:', sendErr?.message ?? sendErr);
+    }
   } catch (err) {
-    console.error('[TrackFlow] Failed to send browser context:', err?.message ?? err);
+    console.error('[TrackFlow] Failed to collect browser context:', err?.message ?? err);
   }
 }
 
