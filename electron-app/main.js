@@ -7,31 +7,70 @@ const PORT = 8080
 const SERVER_URL = `http://127.0.0.1:${PORT}`
 
 // --- Kill old servers/processes before starting fresh ---
-function cleanupOldProcesses() {
-  const targets = ['TrackFlowServer.exe', 'TrackFlowAgent.exe']
-  for (const name of targets) {
-    try {
-      execSync(`taskkill /f /im "${name}"`, { windowsHide: true, stdio: 'ignore' })
-      console.log(`Killed old ${name}`)
-    } catch (e) { /* not running, ignore */ }
-  }
-  // Also kill anything on our ports (dev servers, old instances)
-  for (const port of [PORT, 10101, 5173]) {
-    try {
-      const result = execSync(`netstat -ano | findstr "LISTENING" | findstr ":${port} "`, { encoding: 'utf-8', windowsHide: true })
-      const lines = result.trim().split('\n')
-      for (const line of lines) {
-        const parts = line.trim().split(/\s+/)
-        const pid = parts[parts.length - 1]
-        if (pid && pid !== '0') {
-          try {
-            execSync(`taskkill /f /pid ${pid}`, { windowsHide: true, stdio: 'ignore' })
-            console.log(`Killed PID ${pid} on port ${port}`)
-          } catch (e) { /* ignore */ }
-        }
+function killByName(name) {
+  try {
+    execSync(`taskkill /f /im "${name}"`, { windowsHide: true, stdio: 'ignore' })
+    console.log(`Killed ${name}`)
+  } catch (e) { /* not running */ }
+}
+
+function killByPort(port) {
+  try {
+    // Use netstat to find PIDs listening on the port, then kill each one
+    const out = execSync(
+      `netstat -ano | findstr LISTENING | findstr ":${port}"`,
+      { encoding: 'utf-8', windowsHide: true }
+    )
+    const pids = new Set()
+    for (const line of out.trim().split('\n')) {
+      // Match lines where the local address ends with :PORT
+      const match = line.match(/:(\d+)\s+\S+\s+LISTENING\s+(\d+)/)
+      if (match && match[1] === String(port)) {
+        pids.add(match[2])
       }
-    } catch (e) { /* no process on port, ignore */ }
-  }
+    }
+    for (const pid of pids) {
+      if (pid !== '0') {
+        try {
+          execSync(`taskkill /f /t /pid ${pid}`, { windowsHide: true, stdio: 'ignore' })
+          console.log(`Killed PID ${pid} on port ${port}`)
+        } catch (e) { /* already dead */ }
+      }
+    }
+  } catch (e) { /* no process on port */ }
+}
+
+function killByScript(scriptName) {
+  try {
+    const out = execSync(
+      `wmic process where "CommandLine like '%${scriptName}%'" get ProcessId /format:list`,
+      { encoding: 'utf-8', windowsHide: true }
+    )
+    for (const line of out.split('\n')) {
+      const m = line.match(/ProcessId=(\d+)/)
+      if (m && m[1] !== '0') {
+        try {
+          execSync(`taskkill /f /t /pid ${m[1]}`, { windowsHide: true, stdio: 'ignore' })
+          console.log(`Killed PID ${m[1]} (${scriptName})`)
+        } catch (e) { /* already dead */ }
+      }
+    }
+  } catch (e) { /* not running */ }
+}
+
+function cleanupOldProcesses() {
+  // Kill packaged EXEs (production)
+  killByName('TrackFlowServer.exe')
+  killByName('TrackFlowAgent.exe')
+
+  // Kill by port — catches python dev server on 8080 and vite on 5173
+  killByPort(PORT)    // 8080 — backend
+  killByPort(5173)    // vite dev server
+  killByPort(10101)   // old proxy port (legacy)
+
+  // Kill python dev processes by script name (agent has no port)
+  killByScript('collector_windows')
+  killByScript('uvicorn')
 }
 
 let mainWindow = null
@@ -210,8 +249,17 @@ app.whenReady().then(async () => {
   // Kill any old servers/dev processes occupying our ports
   cleanupOldProcesses()
 
-  // Small delay to let ports free up
-  await new Promise(r => setTimeout(r, 1000))
+  // Wait for port 8080 to be free (up to 5 seconds)
+  for (let i = 0; i < 10; i++) {
+    try {
+      execSync(`netstat -ano | findstr LISTENING | findstr ":${PORT}"`, { encoding: 'utf-8', windowsHide: true })
+      // Port still occupied, wait
+      await new Promise(r => setTimeout(r, 500))
+    } catch (e) {
+      // findstr returned no match — port is free
+      break
+    }
+  }
 
   // Start server + agent
   startServer()

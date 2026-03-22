@@ -21,10 +21,6 @@ if getattr(sys, "frozen", False) and sys.stdout is None:
 
 import psutil
 import requests
-import pymongo
-from pymongo import MongoClient
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import shutil
 import subprocess
@@ -70,7 +66,7 @@ def gui_alert(title, message, is_error=False):
 APPDATA_PATH = Path(os.getenv("APPDATA", Path.home() / "AppData/Roaming")) / "TrackFlow"
 APPDATA_PATH.mkdir(parents=True, exist_ok=True)
 
-API_BASE_URL = os.getenv("TRACKER_API_BASE_URL", "http://127.0.0.1:10101")
+API_BASE_URL = os.getenv("TRACKER_API_BASE_URL", "http://127.0.0.1:8080")
 CONFIG_PATH = APPDATA_PATH / "agent_config.json"
 
 POLL_SECONDS = float(os.getenv("TRACKER_POLL_SECONDS", "2"))
@@ -81,8 +77,6 @@ SOURCE_NAME = os.getenv("TRACKER_SOURCE_NAME", "windows_agent")
 RULES_PATH = Path(os.getenv("TRACKER_RULES_PATH", APPDATA_PATH / "productivity_rules.json"))
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("TRACKER_REQUEST_TIMEOUT_SECONDS", "10"))
 REGISTRATION_TOKEN = os.getenv("TRACKER_REGISTRATION_TOKEN")
-MONGODB_URI = os.getenv("MONGODB_URI")
-MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME") or os.getenv("MONGODB_DB", "tracker")
 
 PROCESS_ALIASES = {
     "code.exe": "VS Code",
@@ -236,135 +230,6 @@ class OpenActivity:
     started_at: datetime
 
 
-class LocalProxyHandler(BaseHTTPRequestHandler):
-    tracker = None
-
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Machine-GUID')
-        self.end_headers()
-
-    def do_POST(self):
-        content_length = int(self.headers['Content-Length'])
-        post_data = self.rfile.read(content_length)
-        try:
-            payload = json.loads(post_data)
-            path = self.path.rstrip('/')
-
-            # Add device info
-            machine_guid = self.tracker.machine_guid if self.tracker else self.headers.get('X-Machine-GUID', '')
-            payload["device_id"] = machine_guid
-            payload["machine_guid"] = machine_guid
-
-            # Map paths to collections
-            collection_map = {
-                "/api/v1/context/editor": "editor_context",
-                "/api/v1/context/browser": "browser_context",
-                "/api/v1/context/app": "app_context",
-                "/api/v1/events": "events",
-                "/api/v1/idle": "idle_periods"
-            }
-
-            collection_name = collection_map.get(path)
-            if not collection_name:
-                self.send_response(404)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                return
-
-            # Convert ISO strings to naive LOCAL datetime objects for MongoDB
-            # Also store the original local time string for direct display
-            for key in ["captured_at", "started_at", "ended_at"]:
-                if key in payload and isinstance(payload[key], str):
-                    raw_str = payload[key]
-                    try:
-                        # Parse the ISO string
-                        if 'Z' in raw_str or '+' in raw_str[10:]:
-                            # UTC or timezone-aware — convert to local
-                            dt = datetime.fromisoformat(raw_str.replace('Z', '+00:00'))
-                            dt = dt.astimezone()  # to system local
-                            dt = dt.replace(tzinfo=None)
-                        else:
-                            # Already local naive time from extension
-                            dt = datetime.fromisoformat(raw_str)
-                        payload[key] = dt
-                        # Store display string — full ISO local time for frontend parsing
-                        payload[f"{key}_str"] = dt.strftime("%Y-%m-%dT%H:%M:%S")
-                    except:
-                        pass
-
-            # Build fallback payload NOW — before insert_one() can mutate the dict with _id
-            # Use a custom serializer so datetimes and any stray ObjectIds are safely encoded
-            def _proxy_json_default(obj):
-                if isinstance(obj, datetime):
-                    return obj.strftime("%Y-%m-%dT%H:%M:%S")
-                return str(obj)  # handles ObjectId, bytes, and any other non-serializable type
-
-            fallback_body = json.dumps(payload, default=_proxy_json_default).encode()
-
-            def _send_ok():
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"message": "proxied to mongodb"}).encode())
-
-            def _send_response_safe(status, content=None):
-                try:
-                    self.send_response(status)
-                    self.send_header('Access-Control-Allow-Origin', '*')
-                    self.send_header('Content-Type', 'application/json')
-                    self.end_headers()
-                    if content:
-                        self.wfile.write(content)
-                except OSError:
-                    pass  # Client disconnected — socket errors on Windows are all OSError
-
-            # Fast path: direct MongoDB insert
-            if self.tracker and self.tracker.db is not None:
-                try:
-                    self.tracker.db[collection_name].insert_one(payload)
-                    try:
-                        _send_ok()
-                    except OSError:
-                        pass  # Client timed out — data was saved to MongoDB, ignore
-                    return
-                except Exception as mongo_err:
-                    print(f"MongoDB insert failed, falling back to API: {mongo_err}")
-                    # Mark connection as dead so health check reconnects
-                    self.tracker.db = None
-                    self.tracker.client = None
-
-            # Fallback: forward to backend API at port 8080 using pre-built JSON body
-            try:
-                resp = requests.post(
-                    f"http://127.0.0.1:8080{path}",
-                    data=fallback_body,
-                    headers={"X-Machine-GUID": machine_guid, "Content-Type": "application/json"},
-                    timeout=5
-                )
-                _send_response_safe(resp.status_code, resp.content)
-            except Exception as fwd_err:
-                print(f"Proxy fallback error: {fwd_err}")
-                _send_response_safe(502)
-        except OSError:
-            pass  # Client disconnected — all Windows socket errors are OSError subclasses
-        except Exception as e:
-            print(f"Proxy error: {e}")
-            try:
-                self.send_response(500)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-            except OSError:
-                pass
-
-    def log_message(self, format, *args):
-        # Suppress logging for every request
-        return
-
-
 class ProductivityRules:
     def __init__(self, rules: dict[str, list[str]]) -> None:
         self.rules = {key: [self._normalize(item) for item in values] for key, values in rules.items()}
@@ -437,61 +302,15 @@ class WindowsTracker:
         self.machine_guid = self.get_machine_guid()
         
         self.api_base_url = API_BASE_URL
-        self.mongodb_uri = MONGODB_URI or os.getenv("MONGODB_URI")
-        self.mongodb_db_name = MONGODB_DB_NAME or os.getenv("MONGODB_DB", "tracker")
-        
+
         self.ensure_registered()
         self.add_to_startup()
         self.install_extensions()
 
-        # MongoDB Connection
-        self.client = None
-        self.db = None
-        self.connect_mongodb()
-        
-        # Start Local Proxy
-        self.start_proxy()
-        
         self.rules = ProductivityRules.load(RULES_PATH)
         self.current_activity: OpenActivity | None = None
         self.idle_started_at: datetime | None = None
         self.running = True
-
-    def connect_mongodb(self):
-        if not self.mongodb_uri:
-            print("Warning: MONGODB_URI not found. Agent will not be able to write directly.")
-            return
-        try:
-            self.client = MongoClient(
-                self.mongodb_uri,
-                serverSelectionTimeoutMS=5000,
-                connectTimeoutMS=5000,
-                socketTimeoutMS=10000,
-            )
-            # Verify connection is actually alive
-            self.client.admin.command('ping')
-            self.db = self.client[self.mongodb_db_name]
-            print(f"Connected to MongoDB: {self.mongodb_db_name}")
-        except Exception as e:
-            print(f"Error connecting to MongoDB: {e}")
-            self.client = None
-            self.db = None
-
-    def start_proxy(self):
-        LocalProxyHandler.tracker = self
-        def run_server():
-            server_address = ('127.0.0.1', 10101)
-            try:
-                class _ReuseHTTPServer(HTTPServer):
-                    allow_reuse_address = True
-                httpd = _ReuseHTTPServer(server_address, LocalProxyHandler)
-                print("Local Proxy listening on 127.0.0.1:10101")
-                httpd.serve_forever()
-            except Exception as e:
-                print(f"Failed to start local proxy: {e}")
-
-        self.proxy_thread = threading.Thread(target=run_server, daemon=True)
-        self.proxy_thread.start()
 
     @staticmethod
     def get_machine_guid() -> str:
@@ -510,15 +329,15 @@ class WindowsTracker:
         return f"fallback-{fallback_id}"
 
     def ensure_registered(self) -> None:
-        """Simple check if we already have the necessary info."""
+        """Load saved config and silently re-register with backend on every launch."""
         if CONFIG_PATH.exists():
             try:
                 config = json.loads(CONFIG_PATH.read_text())
                 if config.get("machine_guid") == self.machine_guid:
                     self.api_base_url = config.get("api_base_url", self.api_base_url)
-                    self.mongodb_uri = config.get("mongodb_uri", self.mongodb_uri)
-                    self.mongodb_db_name = config.get("mongodb_db_name", self.mongodb_db_name)
                     print("Registration config loaded.")
+                    # Always silently re-register so device stays linked in DB
+                    self.perform_registration()
                     return
             except:
                 pass
@@ -615,23 +434,17 @@ class WindowsTracker:
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    # Always save mongodb_uri if returned (server now always returns it)
-                    if data.get("mongodb_uri"):
-                        self.mongodb_uri = data["mongodb_uri"]
-                        self.mongodb_db_name = data.get("mongodb_db", self.mongodb_db_name)
                     # Save config to disk so next launch doesn't re-register
                     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
                     CONFIG_PATH.write_text(json.dumps({
                         "machine_guid": self.machine_guid,
                         "api_base_url": self.api_base_url,
-                        "mongodb_uri": self.mongodb_uri,
-                        "mongodb_db_name": self.mongodb_db_name
                     }))
                     if data.get("assigned_user"):
                         print(f"Device assigned to {data['assigned_user']}")
                         return True
                     else:
-                        print("Device registered. MongoDB URI saved. Waiting for admin assignment...")
+                        print("Device registered. Waiting for admin assignment...")
                         return False
                 elif resp.status_code == 401:
                     print("Invalid registration token.")
@@ -820,7 +633,6 @@ class WindowsTracker:
 
     def run(self) -> None:
         self._register_signal_handlers()
-        self._last_health_check = time.time()
         print(
             f"Starting Windows tracker. API={API_BASE_URL} poll={POLL_SECONDS}s "
             f"idle_threshold={IDLE_THRESHOLD_SECONDS}s max_segment={MAX_SEGMENT_SECONDS}s"
@@ -828,24 +640,6 @@ class WindowsTracker:
         print(f"Rules file: {RULES_PATH}")
 
         while self.running:
-            # Periodic MongoDB health check (every 60 seconds)
-            if self.db is not None and time.time() - self._last_health_check > 60:
-                self._last_health_check = time.time()
-                try:
-                    self.client.admin.command('ping')
-                except Exception as e:
-                    print(f"MongoDB health check failed, will reconnect: {e}")
-                    self.db = None
-                    self.client = None
-
-            # If not connected to MongoDB, keep trying to register/discover
-            if self.db is None:
-                self.perform_registration()
-                self.connect_mongodb()
-                if self.db is None:
-                    time.sleep(10) # Wait longer if not assigned
-                    continue
-
             now = datetime.now().replace(microsecond=0)
             try:
                 idle_seconds = self.get_idle_seconds()
@@ -998,90 +792,46 @@ class WindowsTracker:
     def post_event(self, snapshot: WindowSnapshot, started_at: datetime, ended_at: datetime) -> None:
         if ended_at <= started_at:
             return
-            
         payload = {
-            "device_id": self.machine_guid,
-            "machine_guid": self.machine_guid,
-            "started_at": started_at,
-            "ended_at": ended_at,
+            "started_at": started_at.strftime("%Y-%m-%dT%H:%M:%S"),
+            "ended_at": ended_at.strftime("%Y-%m-%dT%H:%M:%S"),
             "app_name": snapshot.app_name,
             "window_title": snapshot.window_title,
             "url": snapshot.url,
             "category": snapshot.category,
             "productivity_label": snapshot.productivity_label,
-            "notes": json.dumps(
-                {
-                    "process_name": snapshot.process_name,
-                    "classification_source": snapshot.category,
-                }
-            ),
+            "notes": json.dumps({"process_name": snapshot.process_name, "classification_source": snapshot.category}),
             "source": SOURCE_NAME,
         }
-        
-        if self.db is not None:
-            try:
-                self.db.events.insert_one(payload)
-                print(
-                    f"Event saved to MongoDB: {snapshot.app_name} | {snapshot.productivity_label} | "
-                    f"{started_at.strftime('%H:%M:%S')} -> {ended_at.strftime('%H:%M:%S')}"
-                )
-                return
-            except Exception as e:
-                print(f"MongoDB event insert failed, marking for reconnect: {e}")
-                self.db = None
-                self.client = None
-
-        # Fallback: send via API
         try:
-            fallback_payload = {
-                k: v.strftime("%Y-%m-%dT%H:%M:%S") if isinstance(v, datetime) else v
-                for k, v in payload.items()
-            }
             self.session.post(
                 "http://127.0.0.1:8080/api/v1/events",
-                json=fallback_payload,
-                headers={"X-Machine-GUID": self.machine_guid, "Content-Type": "application/json"},
-                timeout=5
+                json=payload,
+                headers={"X-Machine-GUID": self.machine_guid},
+                timeout=5,
             )
-            print(f"Event saved via API fallback: {snapshot.app_name}")
-        except Exception as fwd_err:
-            print(f"Warning: Could not save event (MongoDB down, API fallback failed): {fwd_err}")
+            print(f"Event: {snapshot.app_name} | {snapshot.productivity_label} | {started_at.strftime('%H:%M:%S')} -> {ended_at.strftime('%H:%M:%S')}")
+        except Exception as e:
+            print(f"Warning: Could not save event: {e}")
 
     def post_idle_period(self, started_at: datetime, ended_at: datetime) -> None:
         if ended_at <= started_at:
             return
         payload = {
-            "device_id": self.machine_guid,
-            "machine_guid": self.machine_guid,
-            "started_at": started_at,
-            "ended_at": ended_at,
+            "started_at": started_at.strftime("%Y-%m-%dT%H:%M:%S"),
+            "ended_at": ended_at.strftime("%Y-%m-%dT%H:%M:%S"),
             "reason": "idle",
         }
-        if self.db is not None:
-            try:
-                self.db.idle_periods.insert_one(payload)
-                print(f"Idle period saved to MongoDB: {started_at.strftime('%H:%M:%S')} -> {ended_at.strftime('%H:%M:%S')}")
-                return
-            except Exception as e:
-                print(f"MongoDB idle insert failed, marking for reconnect: {e}")
-                self.db = None
-                self.client = None
-
-        # Fallback: send via API
         try:
-            fallback_payload = {
-                k: v.strftime("%Y-%m-%dT%H:%M:%S") if isinstance(v, datetime) else v
-                for k, v in payload.items()
-            }
             self.session.post(
                 "http://127.0.0.1:8080/api/v1/idle",
-                json=fallback_payload,
-                headers={"X-Machine-GUID": self.machine_guid, "Content-Type": "application/json"},
-                timeout=5
+                json=payload,
+                headers={"X-Machine-GUID": self.machine_guid},
+                timeout=5,
             )
-            print(f"Idle period saved via API fallback")
-        except Exception as fwd_err:
-            print(f"Warning: Could not save idle period (MongoDB down, API fallback failed): {fwd_err}")
+            print(f"Idle: {started_at.strftime('%H:%M:%S')} -> {ended_at.strftime('%H:%M:%S')}")
+        except Exception as e:
+            print(f"Warning: Could not save idle period: {e}")
 
 
 if __name__ == "__main__":

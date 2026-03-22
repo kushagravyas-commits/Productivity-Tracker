@@ -1,14 +1,16 @@
-"""Neon PostgreSQL connection and helpers for Deep Activity context tables.
+"""Neon PostgreSQL — single database for all TrackFlow data.
 
-editor_context, browser_context, and app_context are stored here instead of
-MongoDB Atlas to avoid the 10-15s read timeouts on the free Atlas tier.
-Everything else (events, idle_periods, dashboard, devices) stays on MongoDB.
+Replaces MongoDB Atlas entirely. All 7 tables live here:
+  events, idle_periods, users, devices,
+  editor_context, browser_context, app_context
 """
 from __future__ import annotations
 
 import os
 import re
+import uuid
 from datetime import date, datetime
+from typing import Any
 
 import asyncpg
 
@@ -16,7 +18,7 @@ _pool: asyncpg.Pool | None = None
 
 
 def _clean_dsn(dsn: str) -> str:
-    """Remove channel_binding param — asyncpg handles SSL natively, not via DSN."""
+    """Remove channel_binding param — asyncpg handles SSL natively."""
     dsn = re.sub(r'[?&]channel_binding=[^&]*', '', dsn)
     return dsn.rstrip('?&')
 
@@ -25,7 +27,7 @@ async def init_neon() -> None:
     global _pool
     dsn = os.getenv("NEONDB_URI")
     if not dsn:
-        print("Warning: NEONDB_URI not set — context data will not be stored in Neon.")
+        print("Warning: NEONDB_URI not set — data will not be stored.")
         return
     _pool = await asyncpg.create_pool(_clean_dsn(dsn), ssl='require', min_size=1, max_size=5)
     await _create_tables()
@@ -44,6 +46,50 @@ def is_ready() -> bool:
 async def _create_tables() -> None:
     async with _pool.acquire() as conn:
         await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id                 BIGSERIAL PRIMARY KEY,
+                full_name          TEXT NOT NULL,
+                email              TEXT UNIQUE NOT NULL,
+                role               TEXT NOT NULL DEFAULT 'employee',
+                registration_token TEXT UNIQUE NOT NULL,
+                created_at         TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS devices (
+                id           BIGSERIAL PRIMARY KEY,
+                machine_guid TEXT UNIQUE NOT NULL,
+                email        TEXT,
+                os_type      TEXT,
+                user_id      BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                registered_at  TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                last_seen_at   TIMESTAMP WITHOUT TIME ZONE
+            );
+            CREATE INDEX IF NOT EXISTS idx_devices_email ON devices (email);
+
+            CREATE TABLE IF NOT EXISTS events (
+                id                 BIGSERIAL PRIMARY KEY,
+                device_id          TEXT,
+                started_at         TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+                ended_at           TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+                app_name           TEXT NOT NULL,
+                window_title       TEXT,
+                url                TEXT,
+                category           TEXT,
+                productivity_label TEXT DEFAULT 'neutral',
+                notes              TEXT,
+                source             TEXT DEFAULT 'agent'
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_device_started ON events (device_id, started_at);
+
+            CREATE TABLE IF NOT EXISTS idle_periods (
+                id         BIGSERIAL PRIMARY KEY,
+                device_id  TEXT,
+                started_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+                ended_at   TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+                reason     TEXT DEFAULT 'idle'
+            );
+            CREATE INDEX IF NOT EXISTS idx_idle_device_started ON idle_periods (device_id, started_at);
+
             CREATE TABLE IF NOT EXISTS editor_context (
                 id               BIGSERIAL PRIMARY KEY,
                 device_id        TEXT,
@@ -58,8 +104,7 @@ async def _create_tables() -> None:
                 git_branch       TEXT,
                 debugger_active  BOOLEAN DEFAULT FALSE
             );
-            CREATE INDEX IF NOT EXISTS idx_ec_device_captured
-                ON editor_context (device_id, captured_at);
+            CREATE INDEX IF NOT EXISTS idx_ec_device_captured ON editor_context (device_id, captured_at);
 
             CREATE TABLE IF NOT EXISTS browser_context (
                 id                   BIGSERIAL PRIMARY KEY,
@@ -77,8 +122,7 @@ async def _create_tables() -> None:
                 youtube_progress_pct INT,
                 productivity_label   TEXT DEFAULT 'neutral'
             );
-            CREATE INDEX IF NOT EXISTS idx_bc_device_captured
-                ON browser_context (device_id, captured_at);
+            CREATE INDEX IF NOT EXISTS idx_bc_device_captured ON browser_context (device_id, captured_at);
 
             CREATE TABLE IF NOT EXISTS app_context (
                 id               BIGSERIAL PRIMARY KEY,
@@ -90,13 +134,192 @@ async def _create_tables() -> None:
                 active_sequence  TEXT,
                 notes            TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_ac_device_captured
-                ON app_context (device_id, captured_at);
+            CREATE INDEX IF NOT EXISTS idx_ac_device_captured ON app_context (device_id, captured_at);
         """)
 
 
 # ---------------------------------------------------------------------------
-# Insert helpers
+# Events
+# ---------------------------------------------------------------------------
+
+async def insert_event(r: dict) -> None:
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO events
+              (device_id, started_at, ended_at, app_name, window_title,
+               url, category, productivity_label, notes, source)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            """,
+            r.get("device_id"),
+            r["started_at"],
+            r["ended_at"],
+            r["app_name"],
+            r.get("window_title"),
+            r.get("url"),
+            r.get("category"),
+            r.get("productivity_label") or "neutral",
+            r.get("notes"),
+            r.get("source") or "agent",
+        )
+
+
+async def fetch_events(day: date, device_id: str | None) -> list[asyncpg.Record]:
+    start = datetime(day.year, day.month, day.day, 0, 0, 0)
+    end   = datetime(day.year, day.month, day.day, 23, 59, 59)
+    if device_id:
+        return await _pool.fetch(
+            "SELECT * FROM events WHERE device_id=$1 AND started_at>=$2 AND started_at<=$3 ORDER BY started_at",
+            device_id, start, end,
+        )
+    return await _pool.fetch(
+        "SELECT * FROM events WHERE started_at>=$1 AND started_at<=$2 ORDER BY started_at",
+        start, end,
+    )
+
+
+async def fetch_events_list(day: date | None) -> list[asyncpg.Record]:
+    """Fetch all events, optionally filtered to a day."""
+    if day:
+        start = datetime(day.year, day.month, day.day, 0, 0, 0)
+        end   = datetime(day.year, day.month, day.day, 23, 59, 59)
+        return await _pool.fetch(
+            "SELECT * FROM events WHERE started_at>=$1 AND started_at<=$2 ORDER BY started_at LIMIT 5000",
+            start, end,
+        )
+    return await _pool.fetch("SELECT * FROM events ORDER BY started_at LIMIT 5000")
+
+
+# ---------------------------------------------------------------------------
+# Idle periods
+# ---------------------------------------------------------------------------
+
+async def insert_idle_period(r: dict) -> None:
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO idle_periods (device_id, started_at, ended_at, reason)
+            VALUES ($1,$2,$3,$4)
+            """,
+            r.get("device_id"),
+            r["started_at"],
+            r["ended_at"],
+            r.get("reason") or "idle",
+        )
+
+
+async def fetch_idle(day: date, device_id: str | None) -> list[asyncpg.Record]:
+    start = datetime(day.year, day.month, day.day, 0, 0, 0)
+    end   = datetime(day.year, day.month, day.day, 23, 59, 59)
+    if device_id:
+        return await _pool.fetch(
+            "SELECT * FROM idle_periods WHERE device_id=$1 AND started_at>=$2 AND started_at<=$3 ORDER BY started_at",
+            device_id, start, end,
+        )
+    return await _pool.fetch(
+        "SELECT * FROM idle_periods WHERE started_at>=$1 AND started_at<=$2 ORDER BY started_at",
+        start, end,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Users
+# ---------------------------------------------------------------------------
+
+async def find_user_by_email(email: str) -> asyncpg.Record | None:
+    return await _pool.fetchrow("SELECT * FROM users WHERE email=$1", email)
+
+
+async def find_user_by_token(token: str) -> asyncpg.Record | None:
+    return await _pool.fetchrow("SELECT * FROM users WHERE registration_token=$1", token)
+
+
+async def list_users() -> list[asyncpg.Record]:
+    return await _pool.fetch("SELECT * FROM users ORDER BY created_at")
+
+
+async def insert_user(full_name: str, email: str, role: str, token: str) -> asyncpg.Record:
+    return await _pool.fetchrow(
+        """
+        INSERT INTO users (full_name, email, role, registration_token, created_at)
+        VALUES ($1,$2,$3,$4,NOW()) RETURNING *
+        """,
+        full_name, email, role, token,
+    )
+
+
+async def upsert_user(email: str, full_name: str, role: str = "employee") -> asyncpg.Record:
+    token = str(uuid.uuid4())[:8].upper()
+    return await _pool.fetchrow(
+        """
+        INSERT INTO users (full_name, email, role, registration_token, created_at)
+        VALUES ($1,$2,$3,$4,NOW())
+        ON CONFLICT (email) DO UPDATE
+          SET full_name=EXCLUDED.full_name, role=EXCLUDED.role
+        RETURNING *
+        """,
+        full_name, email, role, token,
+    )
+
+
+async def update_user(_email: str, **fields: Any) -> int:
+    """Update arbitrary fields. Returns matched row count (0 = not found)."""
+    if not fields:
+        return 0
+    sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    vals = list(fields.values())
+    result = await _pool.execute(f"UPDATE users SET {sets} WHERE email=$1", _email, *vals)
+    return int(result.split()[-1])
+
+
+async def delete_user(email: str) -> int:
+    result = await _pool.execute("DELETE FROM users WHERE email=$1", email)
+    return int(result.split()[-1])
+
+
+# ---------------------------------------------------------------------------
+# Devices
+# ---------------------------------------------------------------------------
+
+async def find_device_by_guid(guid: str) -> asyncpg.Record | None:
+    return await _pool.fetchrow("SELECT * FROM devices WHERE machine_guid=$1", guid)
+
+
+async def list_devices() -> list[asyncpg.Record]:
+    return await _pool.fetch("SELECT * FROM devices ORDER BY registered_at")
+
+
+async def upsert_device(machine_guid: str, email: str | None, os_type: str | None) -> asyncpg.Record:
+    return await _pool.fetchrow(
+        """
+        INSERT INTO devices (machine_guid, email, os_type, registered_at, last_seen_at)
+        VALUES ($1,$2,$3,NOW(),NOW())
+        ON CONFLICT (machine_guid) DO UPDATE
+          SET email=COALESCE(EXCLUDED.email, devices.email),
+              os_type=COALESCE(EXCLUDED.os_type, devices.os_type),
+              last_seen_at=NOW()
+        RETURNING *
+        """,
+        machine_guid, email, os_type,
+    )
+
+
+async def link_device_to_user(machine_guid: str, user_id: int, email: str) -> None:
+    await _pool.execute(
+        "UPDATE devices SET user_id=$2, email=$3, last_seen_at=NOW() WHERE machine_guid=$1",
+        machine_guid, user_id, email,
+    )
+
+
+async def update_device_email(old_email: str, new_email: str) -> None:
+    await _pool.execute(
+        "UPDATE devices SET email=$2 WHERE email=$1",
+        old_email, new_email,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Context tables (editor, browser, app)
 # ---------------------------------------------------------------------------
 
 async def insert_editor_context(r: dict) -> None:
@@ -169,10 +392,6 @@ async def insert_app_context(r: dict) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Query helper
-# ---------------------------------------------------------------------------
-
 async def query_context(
     table: str,
     day: date,
@@ -180,19 +399,17 @@ async def query_context(
     since_dt: datetime | None,
     limit: int,
 ) -> list[asyncpg.Record]:
-    """Fetch rows for a given day from a context table.
-
-    device_id is intentionally ignored — browser/editor extensions each generate
-    their own UUID which doesn't match the Windows machine GUID the frontend uses.
-    Context data is single-machine so no device filtering is needed.
-    """
+    """Fetch context rows for a day. device_id ignored — extensions use their own UUIDs."""
     start = datetime(day.year, day.month, day.day, 0, 0, 0)
     end   = datetime(day.year, day.month, day.day, 23, 59, 59)
-    after = since_dt if since_dt is not None else start
-
+    if since_dt is not None:
+        # Incremental: strictly after the last seen timestamp (avoid duplicates)
+        return await _pool.fetch(
+            f"SELECT * FROM {table} WHERE captured_at>$1 AND captured_at<=$2 ORDER BY captured_at LIMIT $3",
+            since_dt, end, limit,
+        )
+    # Full fetch: include everything from midnight onwards
     return await _pool.fetch(
-        f"SELECT * FROM {table}"
-        " WHERE captured_at>$1 AND captured_at<=$2"
-        " ORDER BY captured_at LIMIT $3",
-        after, end, limit,
+        f"SELECT * FROM {table} WHERE captured_at>=$1 AND captured_at<=$2 ORDER BY captured_at LIMIT $3",
+        start, end, limit,
     )
