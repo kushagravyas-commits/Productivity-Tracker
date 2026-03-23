@@ -107,26 +107,39 @@ def main():
         register_device(machine_guid)
     
     print("Starting activity tracking...")
-    last_app = None
-    last_title = None
+    last_app, last_title = get_active_window_info()
+    start_time = datetime.utcnow()
+    
+    headers = {"X-Machine-GUID": machine_guid}
     
     while True:
         try:
-            app_name, title = get_active_window_info()
-            
-            # Simplified heartbeat: only report if application changed or every 30s
-            if app_name != last_app or title != last_title:
-                payload = {
-                    "device_id": machine_guid,
-                    "app_name": app_name,
-                    "window_title": title,
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "status": "active"
-                }
-                requests.post(f"{API_BASE_URL}/api/v1/context/app", json=payload, timeout=5)
-                last_app, last_title = app_name, title
-            
             time.sleep(5) # Poll every 5 seconds
+            current_app, current_title = get_active_window_info()
+            
+            # If app or title changed, or 60 seconds passed, finish this segment
+            now = datetime.utcnow()
+            duration = (now - start_time).total_seconds()
+            
+            if (current_app != last_app or current_title != last_title or duration > 60) and duration > 1:
+                # Send the completed segment to events
+                payload = {
+                    "started_at": start_time.isoformat() + "Z",
+                    "ended_at": now.isoformat() + "Z",
+                    "app_name": last_app,
+                    "window_title": last_title,
+                    "source": "macos_agent"
+                }
+                try:
+                    requests.post(f"{API_BASE_URL}/api/v1/events", json=payload, headers=headers, timeout=5)
+                    print(f"Logged segment: {last_app} ({int(duration)}s)")
+                except Exception as e:
+                    print(f"Failed to log segment: {e}")
+                
+                # Reset for new segment
+                last_app, last_title = current_app, current_title
+                start_time = now
+            
         except Exception as e:
             print(f"Tracking error: {e}")
             time.sleep(10)
