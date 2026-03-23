@@ -147,7 +147,7 @@ function getResourcePath(filename) {
   if (app.isPackaged) {
     return path.join(process.resourcesPath, 'server', filename)
   }
-  return path.join(__dirname, '..', 'dist_bin', filename)
+  return path.join(__dirname, '..', 'dist_bin_mac', filename)
 }
 
 // --- Start FastAPI Server ---
