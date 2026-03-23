@@ -90,6 +90,8 @@ def build_backend():
         "--hidden-import=uvicorn.lifespan.on",
         "--hidden-import=dns.resolver",
         "--hidden-import=dns.rdatatype",
+        "--hidden-import=asyncpg",
+        "--hidden-import=asyncpg.pgproto.pgproto",
         "app/main.py",
     ]
     subprocess.run(cmd, check=True)
