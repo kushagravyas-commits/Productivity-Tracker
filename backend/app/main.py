@@ -244,6 +244,25 @@ async def assign_device(machine_guid: str, payload: DeviceAssignIn) -> MessageRe
     return MessageResponse(message=f"Device {machine_guid[:8]} assigned to {payload.email}")
 
 
+@app.get("/api/v1/machine-guid", tags=["registration"])
+def get_backend_machine_guid():
+    """Return the unique hardware ID of the machine where this server is running."""
+    try:
+        import sys
+        if sys.platform == "win32":
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography")
+            guid, _ = winreg.QueryValueEx(key, "MachineGuid")
+            return {"machine_guid": guid}
+        elif sys.platform == "darwin":
+            import subprocess
+            cmd = "ioreg -rd1 -c IOPlatformExpertDevice | awk '/IOPlatformUUID/ { split($0, line, \"\\\"\"); printf(\"%s\", line[4]); }'"
+            out = subprocess.check_output(cmd, shell=True).decode().strip()
+            if out: return {"machine_guid": out}
+    except Exception as e:
+        print(f"Error getting machine guid: {e}")
+    return {"machine_guid": None}
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------

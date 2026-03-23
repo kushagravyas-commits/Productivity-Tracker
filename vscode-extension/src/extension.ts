@@ -27,7 +27,6 @@ function getMachineGuid(): string {
 }
 
 function fetchMachineGuidFromBackend(apiUrl: string, retries = 10): void {
-    if (_machineGuidReady) return;
     try {
         const url = new URL('/api/v1/machine-guid', apiUrl);
         http.get({ hostname: url.hostname, port: parseInt(url.port) || 8080, path: url.pathname, timeout: 3000 }, (res) => {
@@ -37,8 +36,11 @@ function fetchMachineGuidFromBackend(apiUrl: string, retries = 10): void {
                 try {
                     const data = JSON.parse(body);
                     if (data.machine_guid) {
-                        _machineGuid = data.machine_guid;
-                        _machineGuidReady = true;
+                        if (_machineGuid !== data.machine_guid) {
+                            console.log(`[TrackFlow] Synced Machine GUID from backend: ${data.machine_guid}`);
+                            _machineGuid = data.machine_guid;
+                            _machineGuidReady = true;
+                        }
                         return;
                     }
                 } catch { /* ignore */ }

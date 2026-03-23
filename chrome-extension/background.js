@@ -20,11 +20,12 @@ async function fetchMachineGuid() {
     const res = await fetch('http://127.0.0.1:8080/api/v1/machine-guid');
     if (res.ok) {
       const data = await res.json();
-      if (data.machine_guid) {
+      if (data.machine_guid && data.machine_guid !== machineGuid) {
+        console.log('[TrackFlow] Synced Machine GUID from backend:', data.machine_guid);
         machineGuid = data.machine_guid;
         chrome.storage.local.set({ trackflow_machine_guid: machineGuid });
-        return;
       }
+      return;
     }
   } catch { /* backend not ready yet */ }
   // Fallback: use cached or generate temporary
