@@ -17,7 +17,7 @@ CHROME_DIR = ROOT_DIR / "chrome-extension"
 def clean():
     print("Cleaning old builds...")
     for d in [BACKEND_DIR / "build", BACKEND_DIR / "dist",
-              AGENT_DIR / "build", AGENT_DIR / "dist", BACKEND_DIR / "static",
+              AGENT_DIR / "build", AGENT_DIR / "dist",
               ROOT_DIR / "__pycache__", BACKEND_DIR / "app" / "__pycache__",
               BACKEND_DIR / "app" / "services" / "__pycache__"]:
         if d.exists():
@@ -129,8 +129,8 @@ def build_agent():
 if __name__ == "__main__":
     try:
         clean()
-        build_vscode_extension()
-        build_frontend()
+        # build_vscode_extension()
+        # build_frontend()
         build_backend()
         build_agent()
         print(f"\n{'='*60}")
