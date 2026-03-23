@@ -399,16 +399,25 @@ async def query_context(
     since_dt: datetime | None,
     limit: int,
 ) -> list[asyncpg.Record]:
-    """Fetch context rows for a day. device_id ignored — extensions use their own UUIDs."""
+    """Fetch context rows for a day, filtered by device_id when provided."""
     start = datetime(day.year, day.month, day.day, 0, 0, 0)
     end   = datetime(day.year, day.month, day.day, 23, 59, 59)
+    if device_id:
+        if since_dt is not None:
+            return await _pool.fetch(
+                f"SELECT * FROM {table} WHERE device_id=$1 AND captured_at>$2 AND captured_at<=$3 ORDER BY captured_at LIMIT $4",
+                device_id, since_dt, end, limit,
+            )
+        return await _pool.fetch(
+            f"SELECT * FROM {table} WHERE device_id=$1 AND captured_at>=$2 AND captured_at<=$3 ORDER BY captured_at LIMIT $4",
+            device_id, start, end, limit,
+        )
+    # No device_id — return all (admin view)
     if since_dt is not None:
-        # Incremental: strictly after the last seen timestamp (avoid duplicates)
         return await _pool.fetch(
             f"SELECT * FROM {table} WHERE captured_at>$1 AND captured_at<=$2 ORDER BY captured_at LIMIT $3",
             since_dt, end, limit,
         )
-    # Full fetch: include everything from midnight onwards
     return await _pool.fetch(
         f"SELECT * FROM {table} WHERE captured_at>=$1 AND captured_at<=$2 ORDER BY captured_at LIMIT $3",
         start, end, limit,

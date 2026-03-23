@@ -58,6 +58,7 @@ export default function App() {
   const lastEditorTs = useRef<string | null>(null)
   const lastBrowserTs = useRef<string | null>(null)
   const lastAppTs = useRef<string | null>(null)
+  const initialFetchDone = useRef(false)
 
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const saved = localStorage.getItem('theme-preference')
@@ -144,23 +145,31 @@ export default function App() {
     lastEditorTs.current = null
     lastBrowserTs.current = null
     lastAppTs.current = null
+    initialFetchDone.current = false
     setContextError(false)
+
+    // Clear stale data immediately so user sees fresh load
+    setEditorContext([])
+    setBrowserContext([])
+    setAppContext([])
 
     void load(day)
     void loadWeekly(day)
-    void getEditorContext(day, selectedDeviceId).then(data => {
-      setEditorContext(data)
-      if (data.length > 0) lastEditorTs.current = data[data.length - 1].captured_at
-      setContextError(false)
-    }).catch(() => setContextError(true))
-    void getBrowserContext(day, selectedDeviceId).then(data => {
-      setBrowserContext(data)
-      if (data.length > 0) lastBrowserTs.current = data[data.length - 1].captured_at
-      setContextError(false)
-    }).catch(() => setContextError(true))
-    void getAppContext(day, selectedDeviceId).then(data => {
-      setAppContext(data)
-      if (data.length > 0) lastAppTs.current = data[data.length - 1].captured_at
+    Promise.all([
+      getEditorContext(day, selectedDeviceId).then(data => {
+        setEditorContext(data)
+        if (data.length > 0) lastEditorTs.current = data[data.length - 1].captured_at
+      }),
+      getBrowserContext(day, selectedDeviceId).then(data => {
+        setBrowserContext(data)
+        if (data.length > 0) lastBrowserTs.current = data[data.length - 1].captured_at
+      }),
+      getAppContext(day, selectedDeviceId).then(data => {
+        setAppContext(data)
+        if (data.length > 0) lastAppTs.current = data[data.length - 1].captured_at
+      }),
+    ]).then(() => {
+      initialFetchDone.current = true
       setContextError(false)
     }).catch(() => setContextError(true))
   }, [day, selectedDeviceId, adminStatus?.is_setup, currentPage])
@@ -168,26 +177,39 @@ export default function App() {
   useEffect(() => {
     if (!isToday || !adminStatus?.is_setup || currentPage === 'employees') return undefined
     const id = window.setInterval(() => {
+      if (!initialFetchDone.current) return
       void load(day, { silent: true })
       // Incremental context fetch — only get new snapshots since last fetch
       void getEditorContext(day, selectedDeviceId, lastEditorTs.current ?? undefined).then(data => {
         if (data.length > 0) {
           lastEditorTs.current = data[data.length - 1].captured_at
-          setEditorContext(prev => [...prev, ...data])
+          setEditorContext(prev => {
+            const existing = new Set(prev.map(e => e.captured_at))
+            const fresh = data.filter(e => !existing.has(e.captured_at))
+            return fresh.length > 0 ? [...prev, ...fresh] : prev
+          })
         }
         setContextError(false)
       }).catch(() => setContextError(true))
       void getBrowserContext(day, selectedDeviceId, lastBrowserTs.current ?? undefined).then(data => {
         if (data.length > 0) {
           lastBrowserTs.current = data[data.length - 1].captured_at
-          setBrowserContext(prev => [...prev, ...data])
+          setBrowserContext(prev => {
+            const existing = new Set(prev.map(e => e.captured_at))
+            const fresh = data.filter(e => !existing.has(e.captured_at))
+            return fresh.length > 0 ? [...prev, ...fresh] : prev
+          })
         }
         setContextError(false)
       }).catch(() => setContextError(true))
       void getAppContext(day, selectedDeviceId, lastAppTs.current ?? undefined).then(data => {
         if (data.length > 0) {
           lastAppTs.current = data[data.length - 1].captured_at
-          setAppContext(prev => [...prev, ...data])
+          setAppContext(prev => {
+            const existing = new Set(prev.map(e => e.captured_at))
+            const fresh = data.filter(e => !existing.has(e.captured_at))
+            return fresh.length > 0 ? [...prev, ...fresh] : prev
+          })
         }
         setContextError(false)
       }).catch(() => setContextError(true))
@@ -208,6 +230,7 @@ export default function App() {
 
   async function handleRefresh() {
     setLoading(true)
+    initialFetchDone.current = false
     // Reset incremental refs — force full reload
     lastEditorTs.current = null
     lastBrowserTs.current = null
@@ -231,6 +254,7 @@ export default function App() {
       ])
       setLastUpdated(new Date().toLocaleTimeString())
     } finally {
+      initialFetchDone.current = true
       setLoading(false)
     }
   }

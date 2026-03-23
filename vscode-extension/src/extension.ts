@@ -1,19 +1,59 @@
 import * as vscode from 'vscode';
 import * as http from 'http';
+import * as https from 'https';
 import * as path from 'path';
 import * as cp from 'child_process';
 
+let _machineGuid: string | null = null;
+let _machineGuidReady = false;
+
 function getMachineGuid(): string {
+    if (_machineGuid) return _machineGuid;
+    // Try reading from Windows registry
     try {
         if (process.platform === 'win32') {
             const out = cp.execSync('reg query HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography /v MachineGuid').toString();
             const match = /MachineGuid\s+REG_SZ\s+(.+)/.exec(out);
-            if (match) return match[1].trim();
+            if (match) {
+                _machineGuid = match[1].trim();
+                _machineGuidReady = true;
+                return _machineGuid;
+            }
         }
     } catch {
-        // Fallback
+        // Registry failed — will be resolved by backend fetch
     }
-    return vscode.env.machineId; // VS Code's own unique ID as fallback
+    return vscode.env.machineId;
+}
+
+function fetchMachineGuidFromBackend(apiUrl: string, retries = 10): void {
+    if (_machineGuidReady) return;
+    try {
+        const url = new URL('/api/v1/machine-guid', apiUrl);
+        http.get({ hostname: url.hostname, port: parseInt(url.port) || 8080, path: url.pathname, timeout: 3000 }, (res) => {
+            let body = '';
+            res.on('data', (chunk) => { body += chunk; });
+            res.on('end', () => {
+                try {
+                    const data = JSON.parse(body);
+                    if (data.machine_guid) {
+                        _machineGuid = data.machine_guid;
+                        _machineGuidReady = true;
+                        return;
+                    }
+                } catch { /* ignore */ }
+                // Backend returned null — retry
+                if (retries > 0) {
+                    setTimeout(() => fetchMachineGuidFromBackend(apiUrl, retries - 1), 3000);
+                }
+            });
+        }).on('error', () => {
+            // Backend not ready — retry
+            if (retries > 0) {
+                setTimeout(() => fetchMachineGuidFromBackend(apiUrl, retries - 1), 3000);
+            }
+        });
+    } catch { /* ignore */ }
 }
 
 let timer: ReturnType<typeof setInterval> | undefined;
@@ -115,9 +155,13 @@ function sendPayload(apiUrl: string, context: EditorContext, isRetry = false): v
   try {
     const body = JSON.stringify(context);
     const url = new URL('/api/v1/context/editor', apiUrl);
+    const isHttps = url.protocol === 'https:';
+    const client = isHttps ? https : http;
+    const defaultPort = isHttps ? 443 : 80;
+
     const options: http.RequestOptions = {
       hostname: url.hostname,
-      port: parseInt(url.port) || 10101,
+      port: url.port ? parseInt(url.port) : defaultPort,
       path: url.pathname,
       method: 'POST',
       timeout: 5000,
@@ -127,7 +171,7 @@ function sendPayload(apiUrl: string, context: EditorContext, isRetry = false): v
         'X-Machine-GUID': getMachineGuid(),
       },
     };
-    const req = http.request(options);
+    const req = client.request(options);
     req.setTimeout(5000, () => {
       req.destroy();
     });
@@ -137,9 +181,13 @@ function sendPayload(apiUrl: string, context: EditorContext, isRetry = false): v
         _lastFailedPayload = { apiUrl, context };
       }
     });
-    req.on('response', () => {
-      // Success — clear retry buffer
-      _lastFailedPayload = null;
+    req.on('response', (res) => {
+      // Consume the response stream to free the socket
+      res.on('data', () => {});
+      res.on('end', () => {
+        // Success — clear retry buffer
+        _lastFailedPayload = null;
+      });
     });
     req.write(body);
     req.end();
@@ -151,6 +199,10 @@ function sendPayload(apiUrl: string, context: EditorContext, isRetry = false): v
 export function activate(context: vscode.ExtensionContext): void {
   const config = vscode.workspace.getConfiguration('trackflow');
   const intervalMs = ((config.get('intervalSeconds') as number) ?? 5) * 1000;
+  const apiUrl: string = config.get('apiUrl') ?? 'http://127.0.0.1:8080';
+
+  // Fetch machine GUID from backend (fallback if registry fails)
+  fetchMachineGuidFromBackend(apiUrl);
 
   // Send immediately on activate
   void collectAndSend();

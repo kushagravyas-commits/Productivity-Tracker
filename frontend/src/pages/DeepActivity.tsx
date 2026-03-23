@@ -58,6 +58,20 @@ export default function DeepActivity({ day, editorContext, browserContext, appCo
   const [userPickedCategory, setUserPickedCategory] = useState(false)
   const [selectedApp, setSelectedApp] = useState<string | null>(null)
 
+  // Filters
+  const [editorFileFilter, setEditorFileFilter] = useState<string | null>(null)
+  const [editorLangFilter, setEditorLangFilter] = useState<string | null>(null)
+  const [browserDomainFilter, setBrowserDomainFilter] = useState<string | null>(null)
+  const [browserLabelFilter, setBrowserLabelFilter] = useState<string | null>(null)
+
+  // Reset filters on day/category change
+  useEffect(() => {
+    setEditorFileFilter(null)
+    setEditorLangFilter(null)
+    setBrowserDomainFilter(null)
+    setBrowserLabelFilter(null)
+  }, [day, category])
+
   // Auto-select the best tab once data first arrives, but only if user hasn't clicked a tab yet
   useEffect(() => {
     if (userPickedCategory) return
@@ -69,7 +83,35 @@ export default function DeepActivity({ day, editorContext, browserContext, appCo
   // --- EDITOR DATA PROCESSING ---
   const editorApps = useMemo(() => Array.from(new Set(editorContext.map(e => e.editor_app))), [editorContext])
   const activeEditorApp = selectedApp ?? editorApps[0] ?? null
-  const appEditorData = useMemo(() => editorContext.filter(e => e.editor_app === activeEditorApp), [editorContext, activeEditorApp])
+  const appEditorDataRaw = useMemo(() => editorContext.filter(e => e.editor_app === activeEditorApp), [editorContext, activeEditorApp])
+
+  // Apply editor filters
+  const appEditorData = useMemo(() => {
+    let data = appEditorDataRaw
+    if (editorFileFilter) data = data.filter(e => e.active_file === editorFileFilter)
+    if (editorLangFilter) data = data.filter(e => e.language === editorLangFilter)
+    return data
+  }, [appEditorDataRaw, editorFileFilter, editorLangFilter])
+
+  // Filter options
+  const editorFileOptions = useMemo(() => Array.from(new Set(appEditorDataRaw.map(e => e.active_file).filter(Boolean) as string[])).sort(), [appEditorDataRaw])
+  const editorLangOptions = useMemo(() => Array.from(new Set(appEditorDataRaw.map(e => e.language).filter(Boolean) as string[])).sort(), [appEditorDataRaw])
+
+  // Editor timeline — group consecutive same-file snapshots
+  const editorTimeline = useMemo(() => {
+    const segments: { file: string; language: string | null; start: string; end: string; count: number; branch: string | null }[] = []
+    for (const snap of appEditorData) {
+      const last = segments[segments.length - 1]
+      const currentFile = snap.active_file ?? '(no file)'
+      if (last && last.file === currentFile) {
+        last.end = snap.captured_at
+        last.count++
+      } else {
+        segments.push({ file: currentFile, language: snap.language, start: snap.captured_at, end: snap.captured_at, count: 1, branch: snap.git_branch })
+      }
+    }
+    return segments.reverse()
+  }, [appEditorData])
 
   const fileFreq = useMemo(() => {
     const counts: Record<string, number> = {}
@@ -104,7 +146,18 @@ export default function DeepActivity({ day, editorContext, browserContext, appCo
   // --- BROWSER DATA PROCESSING ---
   const browserApps = useMemo(() => Array.from(new Set(browserContext.map(b => b.browser_app))), [browserContext])
   const activeBrowserApp = selectedApp ?? browserApps[0] ?? null
-  const browserData = useMemo(() => browserContext.filter(b => b.browser_app === activeBrowserApp), [browserContext, activeBrowserApp])
+  const browserDataRaw = useMemo(() => browserContext.filter(b => b.browser_app === activeBrowserApp), [browserContext, activeBrowserApp])
+
+  // Apply browser filters
+  const browserData = useMemo(() => {
+    let data = browserDataRaw
+    if (browserDomainFilter) data = data.filter(b => b.active_tab_domain === browserDomainFilter)
+    if (browserLabelFilter) data = data.filter(b => (b.productivity_label || 'neutral') === browserLabelFilter)
+    return data
+  }, [browserDataRaw, browserDomainFilter, browserLabelFilter])
+
+  // Filter options
+  const browserDomainOptions = useMemo(() => Array.from(new Set(browserDataRaw.map(b => b.active_tab_domain).filter(Boolean) as string[])).sort(), [browserDataRaw])
 
   const domainFreq = useMemo(() => {
     const counts: Record<string, number> = {}
@@ -284,6 +337,21 @@ export default function DeepActivity({ day, editorContext, browserContext, appCo
             </div>
           )}
 
+          {/* Editor Filters */}
+          <div className="filter-bar">
+            <select value={editorFileFilter ?? ''} onChange={e => setEditorFileFilter(e.target.value || null)} className="filter-select">
+              <option value="">All Files</option>
+              {editorFileOptions.map(f => <option key={f} value={f}>{f}</option>)}
+            </select>
+            <select value={editorLangFilter ?? ''} onChange={e => setEditorLangFilter(e.target.value || null)} className="filter-select">
+              <option value="">All Languages</option>
+              {editorLangOptions.map(l => <option key={l} value={l}>{l}</option>)}
+            </select>
+            {(editorFileFilter || editorLangFilter) && (
+              <button className="filter-clear" onClick={() => { setEditorFileFilter(null); setEditorLangFilter(null); }}>Clear Filters</button>
+            )}
+          </div>
+
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 3fr', gap: 20, marginBottom: 24 }}>
             <Card title="📁 Most Edited Files" icon="folder">
               <ResponsiveContainer width="100%" height={260}>
@@ -309,26 +377,21 @@ export default function DeepActivity({ day, editorContext, browserContext, appCo
             </Card>
           </div>
 
-          <Card title="📋 Snapshot Log">
-            <div className="table-container">
-              <table>
-                <thead>
-                  <tr>{['Time', 'File', 'Lang', 'Tabs', 'Term', 'Branch', 'Debug'].map(h => <th key={h}>{h}</th>)}</tr>
-                </thead>
-                <tbody>
-                  {appEditorData.slice(-50).reverse().map((snap, i) => (
-                    <tr key={snap.captured_at + i}>
-                      <td>{fmtTime(snap.captured_at)}</td>
-                      <td style={{ fontWeight: 500 }}>{snap.active_file ?? '—'}</td>
-                      <td>{snap.language && <span className="lang-badge" style={{ background: langColor(snap.language) + '22', color: langColor(snap.language) }}>{snap.language}</span>}</td>
-                      <td>{snap.open_files.length}</td>
-                      <td>{snap.terminal_count}</td>
-                      <td>{snap.git_branch ? `⎇ ${snap.git_branch}` : '—'}</td>
-                      <td>{snap.debugger_active ? '🐛 Active' : '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          <Card title="⏱️ Editor Timeline" style={{ marginBottom: 24 }}>
+            <div className="timeline-list">
+              {editorTimeline.map((seg, i) => (
+                <div key={i} className="timeline-row">
+                  <span className="time">{fmtTime(seg.start)}</span>
+                  <div className="content">
+                    <div className="lang-indicator" style={{ background: langColor(seg.language) }} />
+                    <div style={{ overflow: 'hidden' }}>
+                      <span className="sub" style={{ fontSize: 10, textTransform: 'uppercase' }}>{seg.language ?? 'unknown'}{seg.branch ? ` / ${seg.branch}` : ''}</span>
+                      <span className="title">{seg.file}</span>
+                    </div>
+                  </div>
+                  <span className="duration">{seg.count * 5 >= 60 ? `${Math.round(seg.count * 5 / 60)}m` : `${seg.count * 5}s`}</span>
+                </div>
+              ))}
             </div>
           </Card>
         </>
@@ -343,6 +406,23 @@ export default function DeepActivity({ day, editorContext, browserContext, appCo
               <Kpi label="Browsing Time" value={`${Math.round(browserSummary.totalSnaps * 5 / 60)}m`} />
             </div>
           )}
+
+          {/* Browser Filters */}
+          <div className="filter-bar">
+            <select value={browserDomainFilter ?? ''} onChange={e => setBrowserDomainFilter(e.target.value || null)} className="filter-select">
+              <option value="">All Domains</option>
+              {browserDomainOptions.map(d => <option key={d} value={d}>{d}</option>)}
+            </select>
+            <select value={browserLabelFilter ?? ''} onChange={e => setBrowserLabelFilter(e.target.value || null)} className="filter-select">
+              <option value="">All Labels</option>
+              <option value="productive">Productive</option>
+              <option value="neutral">Neutral</option>
+              <option value="distracting">Distracting</option>
+            </select>
+            {(browserDomainFilter || browserLabelFilter) && (
+              <button className="filter-clear" onClick={() => { setBrowserDomainFilter(null); setBrowserLabelFilter(null); }}>Clear Filters</button>
+            )}
+          </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 3fr', gap: 20, marginBottom: 24 }}>
             <Card title="🌐 Most Visited Domains" icon="globe" style={{ minWidth: 0 }}>
@@ -453,6 +533,21 @@ export default function DeepActivity({ day, editorContext, browserContext, appCo
       )}
 
       <style>{`
+        .filter-bar {
+          display: flex; gap: 10px; margin-bottom: 20px; align-items: center; flex-wrap: wrap;
+        }
+        .filter-select {
+          padding: 7px 12px; border-radius: 8px; border: 1.5px solid var(--border);
+          background: var(--bg-card); color: var(--text-primary); font-size: 13px;
+          cursor: pointer; min-width: 140px;
+        }
+        .filter-select:focus { outline: none; border-color: var(--accent); }
+        .filter-clear {
+          padding: 7px 14px; border-radius: 8px; border: none;
+          background: rgba(239,68,68,0.15); color: #ef4444; font-size: 12px;
+          cursor: pointer; font-weight: 500;
+        }
+        .filter-clear:hover { background: rgba(239,68,68,0.25); }
         .tab-btn {
           padding: 8px 16px; border: none; background: transparent; color: var(--text-muted);
           cursor: pointer; font-size: 14; font-weight: 500; border-radius: 8px; transition: all 0.2s;

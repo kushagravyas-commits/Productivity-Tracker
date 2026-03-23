@@ -16,7 +16,13 @@ if getattr(sys, "frozen", False) and sys.stdout is None:
     sys.stderr = _log_file
 
 from dotenv import load_dotenv
-load_dotenv()
+
+# When running as a PyInstaller EXE, .env is extracted to sys._MEIPASS
+if getattr(sys, "frozen", False):
+    _base = sys._MEIPASS
+else:
+    _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(_base, ".env"))
 
 from fastapi import FastAPI, HTTPException, Query, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -129,9 +135,9 @@ if static_dir.exists():
     app.mount("/assets", StaticFiles(directory=str(static_dir / "assets")), name="assets")
 
 
-@app.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
-    return HealthResponse(status="ok", app_name=APP_NAME)
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok", "app_name": APP_NAME, "neon_connected": neon_db.is_ready()}
 
 
 async def get_device_id(machine_guid: str | None = Header(None, alias="X-Machine-GUID")) -> str | None:
@@ -260,7 +266,7 @@ async def register_device(reg: DeviceRegisterIn) -> RegisterResponse:
         resp.message = "Device registered and assigned."
 
     elif reg.full_name and reg.email:
-        # First user ever → auto-assign admin role
+        # First user ever - auto-assign admin role
         existing_users = await neon_db.list_users()
         is_first = not existing_users
         role = "admin" if is_first else "employee"
@@ -292,6 +298,36 @@ async def register_device(reg: DeviceRegisterIn) -> RegisterResponse:
                 resp.message = "Device registered and assigned."
 
     return resp
+
+
+@app.get("/api/v1/machine-guid", tags=["registration"])
+async def get_machine_guid() -> dict:
+    """Read this machine's Windows Machine GUID from the registry."""
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            ['reg', 'query', r'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Cryptography', '/v', 'MachineGuid'],
+            encoding='utf-8', stderr=subprocess.DEVNULL,
+        )
+        for line in out.splitlines():
+            if 'MachineGuid' in line:
+                parts = line.strip().split()
+                return {"machine_guid": parts[-1]}
+    except Exception:
+        pass
+    return {"machine_guid": None}
+
+
+@app.get("/api/v1/device-role/{machine_guid}", tags=["registration"])
+async def get_device_role(machine_guid: str) -> dict:
+    """Return the role for the user linked to this device."""
+    device = await neon_db.find_device_by_guid(machine_guid)
+    if not device or not device.get("email"):
+        return {"role": None, "assigned_user": None}
+    user = await neon_db.find_user_by_email(device["email"])
+    if not user:
+        return {"role": None, "assigned_user": None}
+    return {"role": user.get("role", "employee"), "assigned_user": user["full_name"]}
 
 
 # ---------------------------------------------------------------------------
@@ -475,12 +511,16 @@ async def list_events(
 
 @app.post("/api/v1/context/editor", response_model=MessageResponse, tags=["editor"])
 async def post_editor_context(payload: EditorContextIn, device_id: str | None = Depends(get_device_id)) -> MessageResponse:
-    doc = payload.model_dump()
-    doc["device_id"] = device_id
-    doc["captured_at"] = parse_local_time(doc["captured_at"])
-    await neon_db.insert_editor_context(doc)
-    print(f"[EDITOR] stored: {doc['captured_at']} file={doc.get('active_file')} dev={device_id}")
-    return MessageResponse(message="ok")
+    try:
+        doc = payload.model_dump()
+        doc["device_id"] = device_id
+        doc["captured_at"] = parse_local_time(doc["captured_at"])
+        await neon_db.insert_editor_context(doc)
+        print(f"[EDITOR] stored: {doc['captured_at']} file={doc.get('active_file')} dev={device_id}")
+        return MessageResponse(message="ok")
+    except Exception as e:
+        print(f"[EDITOR ERROR] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/v1/context/editor/{day}", response_model=list[EditorContextItem], tags=["editor"])
@@ -488,17 +528,16 @@ async def get_editor_context(
     day: str,
     device_id: str | None = Query(None),
     since: str | None = Query(None),
-    limit: int = Query(500, le=5000),
+    limit: int = Query(10000, le=20000),
 ) -> list[EditorContextItem]:
     try:
         target = date.fromisoformat(day)
     except ValueError:
         raise HTTPException(status_code=400, detail="day must be YYYY-MM-DD")
 
-    if not since:
+    if not since and target != date.today():
         cache_key = f"editor:{day}:{device_id}:{limit}"
-        ttl = 10 if target == date.today() else 86400
-        cached = cache_get(cache_key, ttl)
+        cached = cache_get(cache_key, 86400)
         if cached is not None:
             return cached
 
@@ -511,7 +550,7 @@ async def get_editor_context(
 
     try:
         rows = await neon_db.query_context("editor_context", target, device_id, since_dt, limit)
-        print(f"[GET editor] day={day} since={since} device={device_id} → {len(rows)} rows")
+        print(f"[GET editor] day={day} since={since} device={device_id} -> {len(rows)} rows")
         items = []
         for i, r in enumerate(rows):
             try:
@@ -530,7 +569,7 @@ async def get_editor_context(
                 ))
             except Exception as e:
                 print(f"Error parsing editor context row: {e}")
-        if not since:
+        if not since and target != date.today():
             cache_set(cache_key, items)
         return items
     except Exception as exc:
@@ -544,14 +583,18 @@ async def get_editor_context(
 
 @app.post("/api/v1/context/browser", response_model=MessageResponse, tags=["browser"])
 async def post_browser_context(payload: BrowserContextIn, device_id: str | None = Depends(get_device_id)) -> MessageResponse:
-    from app.services.classifier import classifier as _clf
-    doc = payload.model_dump()
-    doc["device_id"] = device_id
-    doc["captured_at"] = parse_local_time(doc["captured_at"])
-    doc["productivity_label"] = _clf.classify(doc.get("active_tab_title", ""), doc.get("active_tab_domain", ""))
-    await neon_db.insert_browser_context(doc)
-    print(f"[BROWSER] stored: {doc['captured_at']} domain={doc.get('active_tab_domain')} dev={device_id}")
-    return MessageResponse(message="ok")
+    try:
+        from app.services.classifier import classifier as _clf
+        doc = payload.model_dump()
+        doc["device_id"] = device_id
+        doc["captured_at"] = parse_local_time(doc["captured_at"])
+        doc["productivity_label"] = _clf.classify(doc.get("active_tab_title", ""), doc.get("active_tab_domain", ""))
+        await neon_db.insert_browser_context(doc)
+        print(f"[BROWSER] stored: {doc['captured_at']} domain={doc.get('active_tab_domain')} dev={device_id}")
+        return MessageResponse(message="ok")
+    except Exception as e:
+        print(f"[BROWSER ERROR] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/v1/context/browser/{day}", response_model=list[BrowserContextItem], tags=["browser"])
@@ -559,17 +602,16 @@ async def get_browser_context(
     day: str,
     device_id: str | None = Query(None),
     since: str | None = Query(None),
-    limit: int = Query(500, le=5000),
+    limit: int = Query(10000, le=20000),
 ) -> list[BrowserContextItem]:
     try:
         target = date.fromisoformat(day)
     except ValueError:
         raise HTTPException(status_code=400, detail="day must be YYYY-MM-DD")
 
-    if not since:
+    if not since and target != date.today():
         cache_key = f"browser:{day}:{device_id}:{limit}"
-        ttl = 10 if target == date.today() else 86400
-        cached = cache_get(cache_key, ttl)
+        cached = cache_get(cache_key, 86400)
         if cached is not None:
             return cached
 
@@ -582,7 +624,7 @@ async def get_browser_context(
 
     try:
         rows = await neon_db.query_context("browser_context", target, device_id, since_dt, limit)
-        print(f"[GET browser] day={day} since={since} device={device_id} → {len(rows)} rows")
+        print(f"[GET browser] day={day} since={since} device={device_id} -> {len(rows)} rows")
         items = []
         for i, r in enumerate(rows):
             try:
@@ -603,7 +645,7 @@ async def get_browser_context(
                 ))
             except Exception as e:
                 print(f"Error parsing browser context row: {e}")
-        if not since:
+        if not since and target != date.today():
             cache_set(cache_key, items)
         return items
     except Exception as exc:
@@ -629,17 +671,16 @@ async def get_app_context(
     day: str,
     device_id: str | None = Query(None),
     since: str | None = Query(None),
-    limit: int = Query(500, le=5000),
+    limit: int = Query(10000, le=20000),
 ) -> list[AppContextItem]:
     try:
         target = date.fromisoformat(day)
     except ValueError:
         raise HTTPException(status_code=400, detail="day must be YYYY-MM-DD")
 
-    if not since:
+    if not since and target != date.today():
         cache_key = f"app:{day}:{device_id}:{limit}"
-        ttl = 10 if target == date.today() else 86400
-        cached = cache_get(cache_key, ttl)
+        cached = cache_get(cache_key, 86400)
         if cached is not None:
             return cached
 
@@ -666,7 +707,7 @@ async def get_app_context(
                 ))
             except Exception as e:
                 print(f"Error parsing app context row: {e}")
-        if not since:
+        if not since and target != date.today():
             cache_set(cache_key, items)
         return items
     except Exception as exc:

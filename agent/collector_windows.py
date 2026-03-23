@@ -304,7 +304,7 @@ class WindowsTracker:
         self.api_base_url = API_BASE_URL
 
         self.ensure_registered()
-        self.add_to_startup()
+        # NOTE: add_to_startup() removed — Electron app handles startup registration
         self.install_extensions()
 
         self.rules = ProductivityRules.load(RULES_PATH)
@@ -439,6 +439,7 @@ class WindowsTracker:
                     CONFIG_PATH.write_text(json.dumps({
                         "machine_guid": self.machine_guid,
                         "api_base_url": self.api_base_url,
+                        "role": data.get("role"),
                     }))
                     if data.get("assigned_user"):
                         print(f"Device assigned to {data['assigned_user']}")

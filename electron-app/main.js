@@ -2,11 +2,15 @@ const { app, BrowserWindow, Tray, Menu, nativeImage } = require('electron')
 const { spawn, execSync, execFile } = require('child_process')
 const path = require('path')
 const http = require('http')
+const fs = require('fs')
+const os = require('os')
 
 const PORT = 8080
 const SERVER_URL = `http://127.0.0.1:${PORT}`
+const STARTUP_KEY = 'TrackFlowDashboard'
+const STARTUP_REG_PATH = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
 
-// --- Kill old servers/processes before starting fresh ---
+// --- Kill helpers ---
 function killByName(name) {
   try {
     execSync(`taskkill /f /im "${name}"`, { windowsHide: true, stdio: 'ignore' })
@@ -16,14 +20,12 @@ function killByName(name) {
 
 function killByPort(port) {
   try {
-    // Use netstat to find PIDs listening on the port, then kill each one
     const out = execSync(
       `netstat -ano | findstr LISTENING | findstr ":${port}"`,
       { encoding: 'utf-8', windowsHide: true }
     )
     const pids = new Set()
     for (const line of out.trim().split('\n')) {
-      // Match lines where the local address ends with :PORT
       const match = line.match(/:(\d+)\s+\S+\s+LISTENING\s+(\d+)/)
       if (match && match[1] === String(port)) {
         pids.add(match[2])
@@ -59,31 +61,124 @@ function killByScript(scriptName) {
 }
 
 function cleanupOldProcesses() {
-  // Kill packaged EXEs (production)
+  killByName('TrackFlowServer.exe')
+  killByName('TrackFlowAgent.exe')
+  killByPort(PORT)
+  killByPort(5173)
+  killByPort(10101)
+  killByScript('collector_windows')
+  killByScript('uvicorn')
+}
+
+// --- Kill child processes (SYNCHRONOUS — blocks until dead) ---
+function killProcesses() {
+  app.isQuitting = true
+
+  // 1. Kill tracked child processes by PID
+  for (const proc of [serverProcess, agentProcess]) {
+    if (proc && proc.pid) {
+      try {
+        execSync(`taskkill /f /t /pid ${proc.pid}`, { windowsHide: true, stdio: 'ignore' })
+      } catch (e) { /* already dead */ }
+    }
+  }
+  serverProcess = null
+  agentProcess = null
+
+  // 2. Kill by EXE name (packaged mode)
   killByName('TrackFlowServer.exe')
   killByName('TrackFlowAgent.exe')
 
-  // Kill by port — catches python dev server on 8080 and vite on 5173
-  killByPort(PORT)    // 8080 — backend
-  killByPort(5173)    // vite dev server
-  killByPort(10101)   // old proxy port (legacy)
+  // 3. Kill by port (catches any python dev server still alive)
+  killByPort(PORT)
+  killByPort(5173)
 
-  // Kill python dev processes by script name (agent has no port)
+  // 4. Kill python dev processes by script name
   killByScript('collector_windows')
   killByScript('uvicorn')
+}
+
+// --- Windows startup registry ---
+function addToStartup() {
+  try {
+    const exePath = app.isPackaged ? process.execPath : `"${process.execPath}" "${path.resolve(__dirname)}"`
+    execSync(
+      `reg add "${STARTUP_REG_PATH}" /v ${STARTUP_KEY} /t REG_SZ /d "${exePath}" /f`,
+      { windowsHide: true, stdio: 'ignore' }
+    )
+    console.log('Added to Windows startup')
+  } catch (e) {
+    console.error('Failed to add to startup:', e.message)
+  }
+}
+
+function removeFromStartup() {
+  try {
+    execSync(
+      `reg delete "${STARTUP_REG_PATH}" /v ${STARTUP_KEY} /f`,
+      { windowsHide: true, stdio: 'ignore' }
+    )
+    console.log('Removed from Windows startup')
+  } catch (e) { /* key doesn't exist */ }
+}
+
+// --- Get Windows Machine GUID ---
+function getMachineGuid() {
+  try {
+    const out = execSync(
+      'reg query "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography" /v MachineGuid',
+      { encoding: 'utf-8', windowsHide: true }
+    )
+    const match = /MachineGuid\s+REG_SZ\s+(.+)/.exec(out)
+    if (match) return match[1].trim()
+  } catch (e) { /* fallback */ }
+  return null
+}
+
+// --- Fetch device role from backend ---
+function fetchDeviceRole(machineGuid) {
+  return new Promise((resolve) => {
+    http.get(`${SERVER_URL}/api/v1/device-role/${machineGuid}`, (res) => {
+      let body = ''
+      res.on('data', (chunk) => { body += chunk })
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(body)
+          resolve(data.role || null)
+        } catch (e) {
+          resolve(null)
+        }
+      })
+    }).on('error', () => resolve(null))
+  })
+}
+
+// --- Poll until role is available (agent may still be registering) ---
+async function waitForRole(machineGuid, maxAttempts = 30) {
+  for (let i = 0; i < maxAttempts; i++) {
+    const role = await fetchDeviceRole(machineGuid)
+    if (role) {
+      console.log(`Device role: ${role}`)
+      return role
+    }
+    console.log(`Waiting for agent registration... (${i + 1}/${maxAttempts})`)
+    await new Promise(r => setTimeout(r, 2000))
+  }
+  console.log('Could not determine role, defaulting to employee')
+  return 'employee'
 }
 
 let mainWindow = null
 let tray = null
 let serverProcess = null
 let agentProcess = null
+let deviceRole = null
 
 // --- Locate bundled EXEs ---
 function getResourcePath(filename) {
   if (app.isPackaged) {
     return path.join(process.resourcesPath, 'server', filename)
   }
-  // Dev mode: look in dist_bin
   return path.join(__dirname, '..', 'dist_bin', filename)
 }
 
@@ -103,7 +198,6 @@ function startServer() {
   serverProcess.on('exit', (code) => {
     console.log(`Server exited with code ${code}`)
     serverProcess = null
-    // Auto-restart if not quitting
     if (!app.isQuitting) {
       console.log('Auto-restarting server in 2s...')
       setTimeout(() => startServer(), 2000)
@@ -121,7 +215,6 @@ function startAgent() {
   agentProcess.on('exit', (code) => {
     console.log(`Agent exited with code ${code}`)
     agentProcess = null
-    // Auto-restart if not quitting
     if (!app.isQuitting) {
       console.log('Auto-restarting agent in 2s...')
       setTimeout(() => startAgent(), 2000)
@@ -153,7 +246,7 @@ function waitForServer(retries = 30) {
   })
 }
 
-// --- Create main window ---
+// --- Create main window (admin only) ---
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -173,11 +266,15 @@ function createWindow() {
 
   mainWindow.loadURL(SERVER_URL)
 
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc) => {
+    console.error(`Failed to load: ${desc} (${code})`)
+    mainWindow.loadURL(`data:text/html,<html><body style="background:#0a0a1a;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h1>TrackFlow</h1><p>Server is starting up...</p><p style="color:#888">${desc}</p><p><button onclick="location.reload()" style="padding:10px 24px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:16px">Retry</button></p></div></body></html>`)
+  })
+
   mainWindow.once('ready-to-show', () => {
     mainWindow.show()
   })
 
-  // Minimize to tray instead of closing
   mainWindow.on('close', (event) => {
     if (!app.isQuitting) {
       event.preventDefault()
@@ -191,18 +288,20 @@ function createWindow() {
 }
 
 // --- System tray ---
-function createTray() {
-  // Try to load icon from resources (packaged) or project root (dev)
+function createTray(role) {
   const iconPath = app.isPackaged
     ? path.join(process.resourcesPath, 'icon.ico')
     : path.join(__dirname, 'icon.ico')
   let icon = nativeImage.createFromPath(iconPath)
   if (icon.isEmpty()) icon = nativeImage.createEmpty()
   tray = new Tray(icon)
-  tray.setToolTip('TrackFlow Dashboard')
+  tray.setToolTip('TrackFlow')
 
-  const contextMenu = Menu.buildFromTemplate([
-    {
+  const menuItems = []
+
+  // Only admin gets "Open Dashboard"
+  if (role === 'admin') {
+    menuItems.push({
       label: 'Open Dashboard',
       click: () => {
         if (mainWindow) {
@@ -210,38 +309,29 @@ function createTray() {
           mainWindow.focus()
         }
       }
-    },
-    { type: 'separator' },
-    {
-      label: 'Quit TrackFlow',
-      click: () => {
-        app.isQuitting = true
-        app.quit()
-      }
-    }
-  ])
+    })
+    menuItems.push({ type: 'separator' })
+  }
 
-  tray.setContextMenu(contextMenu)
-  tray.on('double-click', () => {
-    if (mainWindow) {
-      mainWindow.show()
-      mainWindow.focus()
+  menuItems.push({
+    label: 'Quit TrackFlow',
+    click: () => {
+      app.isQuitting = true
+      app.quit()
     }
   })
-}
 
-// --- Kill child processes ---
-function killProcesses() {
-  for (const proc of [serverProcess, agentProcess]) {
-    if (proc) {
-      try {
-        process.kill(proc.pid)
-        spawn('taskkill', ['/f', '/t', '/pid', String(proc.pid)], { windowsHide: true })
-      } catch (e) { /* ignore */ }
-    }
+  tray.setContextMenu(Menu.buildFromTemplate(menuItems))
+
+  // Only admin can open dashboard by double-clicking tray
+  if (role === 'admin') {
+    tray.on('double-click', () => {
+      if (mainWindow) {
+        mainWindow.show()
+        mainWindow.focus()
+      }
+    })
   }
-  serverProcess = null
-  agentProcess = null
 }
 
 // --- App lifecycle ---
@@ -249,14 +339,16 @@ app.whenReady().then(async () => {
   // Kill any old servers/dev processes occupying our ports
   cleanupOldProcesses()
 
-  // Wait for port 8080 to be free (up to 5 seconds)
+  // Wait for OS to release port 8080
+  await new Promise(r => setTimeout(r, 2000))
+
+  // Verify port is actually free
   for (let i = 0; i < 10; i++) {
     try {
-      execSync(`netstat -ano | findstr LISTENING | findstr ":${PORT}"`, { encoding: 'utf-8', windowsHide: true })
-      // Port still occupied, wait
-      await new Promise(r => setTimeout(r, 500))
+      execSync(`netstat -ano | findstr LISTENING | findstr ":${PORT} "`, { encoding: 'utf-8', windowsHide: true })
+      killByPort(PORT)
+      await new Promise(r => setTimeout(r, 1000))
     } catch (e) {
-      // findstr returned no match — port is free
       break
     }
   }
@@ -265,7 +357,7 @@ app.whenReady().then(async () => {
   startServer()
   startAgent()
 
-  // Wait for server to be ready (up to 15 seconds)
+  // Wait for server to be ready
   try {
     await waitForServer(30)
     console.log('Server is ready!')
@@ -273,20 +365,45 @@ app.whenReady().then(async () => {
     console.error('Server failed to start:', err)
   }
 
-  createTray()
-  createWindow()
+  // Determine device role — poll until agent has registered
+  const machineGuid = getMachineGuid()
+  if (machineGuid) {
+    deviceRole = await waitForRole(machineGuid)
+  } else {
+    console.error('Could not read Machine GUID — defaulting to employee')
+    deviceRole = 'employee'
+  }
+
+  console.log(`Starting in ${deviceRole} mode`)
+
+  if (deviceRole === 'admin') {
+    // ADMIN: Show dashboard, no auto-start on boot
+    removeFromStartup()
+    createTray('admin')
+    createWindow()
+  } else {
+    // EMPLOYEE: Hide to tray, auto-start on boot
+    addToStartup()
+    createTray('employee')
+    // No window created — runs silently in background
+  }
 })
 
 app.on('window-all-closed', () => {
-  // Don't quit when window is closed (minimize to tray)
+  // Don't quit — keep running in tray
 })
 
 app.on('before-quit', () => {
+  app.isQuitting = true
+  killProcesses()
+})
+
+app.on('will-quit', () => {
   killProcesses()
 })
 
 app.on('activate', () => {
-  if (mainWindow === null) {
+  if (deviceRole === 'admin' && mainWindow === null) {
     createWindow()
   }
 })
@@ -297,7 +414,7 @@ if (!gotLock) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    if (mainWindow) {
+    if (deviceRole === 'admin' && mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.show()
       mainWindow.focus()

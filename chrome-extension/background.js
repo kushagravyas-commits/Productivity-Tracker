@@ -7,16 +7,32 @@ const FETCH_TIMEOUT_MS = 5000;
 const MAX_RETRY_QUEUE = 50;
 const _retryQueue = [];
 
-// Stable machine ID — generated once, stored in chrome.storage.local
+// Stable machine ID — fetched from backend (matches Windows Machine GUID)
 let machineGuid = null;
-chrome.storage.local.get('trackflow_machine_guid', (result) => {
-  if (result.trackflow_machine_guid) {
-    machineGuid = result.trackflow_machine_guid;
-  } else {
-    machineGuid = crypto.randomUUID();
-    chrome.storage.local.set({ trackflow_machine_guid: machineGuid });
+async function fetchMachineGuid() {
+  // First check cache
+  const cached = await new Promise(r => chrome.storage.local.get('trackflow_machine_guid', r));
+  if (cached.trackflow_machine_guid) {
+    machineGuid = cached.trackflow_machine_guid;
   }
-});
+  // Try fetching real GUID from backend
+  try {
+    const res = await fetch('http://127.0.0.1:8080/api/v1/machine-guid');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.machine_guid) {
+        machineGuid = data.machine_guid;
+        chrome.storage.local.set({ trackflow_machine_guid: machineGuid });
+        return;
+      }
+    }
+  } catch { /* backend not ready yet */ }
+  // Fallback: use cached or generate temporary
+  if (!machineGuid) {
+    machineGuid = crypto.randomUUID();
+  }
+}
+fetchMachineGuid();
 
 // YouTube context is stored here when the content script messages us
 let youtubeContext = null;
