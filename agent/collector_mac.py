@@ -73,28 +73,30 @@ def get_active_window_info():
         return "Unknown", ""
 
 def register_device(machine_guid):
-    """Register this Mac with the backend."""
-    print(f"Registering device: {machine_guid}")
+    """Register this Mac with the backend as an unassigned device."""
     url = f"{API_BASE_URL.rstrip('/')}/api/v1/register"
     payload = {
         "machine_guid": machine_guid,
-        "os_type": "macos",
-        "full_name": os.getenv("USER", "Mac User"),
-        "email": f"{os.getenv('USER', 'user')}@mac.local"
+        "os_type": "macos"
     }
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            # Cache config
-            CONFIG_PATH.write_text(json.dumps({
-                "machine_guid": machine_guid,
-                "role": data.get("role", "employee")
-            }))
-            print("Registration successful!")
-            return True
-    except Exception as e:
-        print(f"Registration failed: {e}")
+    
+    # Retry 5 times since the server might still be booting up
+    for attempt in range(5):
+        try:
+            print(f"Registering device (Attempt {attempt+1}/5): {machine_guid}")
+            resp = requests.post(url, json=payload, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                # Cache config
+                CONFIG_PATH.write_text(json.dumps({
+                    "machine_guid": machine_guid,
+                    "role": data.get("role", "employee")
+                }))
+                print("Registration successful!")
+                return True
+        except Exception as e:
+            print(f"Registration attempt {attempt+1} failed: {e}")
+            time.sleep(3)
     return False
 
 def main():
