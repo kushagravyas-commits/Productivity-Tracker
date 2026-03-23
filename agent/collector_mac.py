@@ -61,13 +61,16 @@ def get_active_window_info():
     return frontAppName & "|||" & windowTitle
     '''
     try:
-        out = subprocess.check_output(['osascript', '-e', script]).decode('utf-8').strip()
+        out = subprocess.check_output(['osascript', '-e', script], stderr=subprocess.STDOUT).decode('utf-8').strip()
         if "|||" in out:
             app_name, window_title = out.split("|||", 1)
             return app_name, window_title
+    except subprocess.CalledProcessError as e:
+        if "not allowed assistive access" in str(e.output):
+            return "Accessibility-Restricted", "Please grant permissions"
+        return "Unknown", ""
     except:
-        pass
-    return "Unknown", ""
+        return "Unknown", ""
 
 def register_device(machine_guid):
     """Register this Mac with the backend."""
