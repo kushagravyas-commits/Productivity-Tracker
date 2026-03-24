@@ -2,10 +2,31 @@ import * as vscode from 'vscode';
 import * as http from 'http';
 import * as https from 'https';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as cp from 'child_process';
 
 let _machineGuid: string | null = null;
 let _machineGuidReady = false;
+
+function tryLoadMacGuidFromAgentConfig(): string | null {
+    try {
+        const configPath = path.join(
+            os.homedir(),
+            'Library',
+            'Application Support',
+            'TrackFlow',
+            'agent_config.json',
+        );
+        if (!fs.existsSync(configPath)) return null;
+        const raw = fs.readFileSync(configPath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        const guid = typeof parsed?.machine_guid === 'string' ? parsed.machine_guid.trim() : '';
+        return guid || null;
+    } catch {
+        return null;
+    }
+}
 
 function getMachineGuid(): string {
     if (_machineGuid) return _machineGuid;
@@ -24,8 +45,14 @@ function getMachineGuid(): string {
         // Registry failed — will be resolved by backend fetch
     }
     if (process.platform === 'darwin') {
+        const macGuid = tryLoadMacGuidFromAgentConfig();
+        if (macGuid) {
+            _machineGuid = macGuid;
+            _machineGuidReady = true;
+            return _machineGuid;
+        }
         // On macOS, avoid emitting vscode machineId as device identity.
-        // Wait for backend-provided hardware UUID so context matches agent events.
+        // Wait for local TrackFlow agent config to provide hardware UUID.
         return '';
     }
     return vscode.env.machineId;
@@ -223,8 +250,13 @@ export function activate(context: vscode.ExtensionContext): void {
   const intervalMs = ((config.get('intervalSeconds') as number) ?? 5) * 1000;
   const apiUrl: string = config.get('apiUrl') ?? 'http://127.0.0.1:8080';
 
-  // Fetch machine GUID from backend (fallback if registry fails)
-  fetchMachineGuidFromBackend(apiUrl);
+  // On macOS, use local agent config GUID to avoid binding to server machine identity.
+  // Keep backend GUID sync for Windows and other platforms.
+  if (process.platform !== 'darwin') {
+    fetchMachineGuidFromBackend(apiUrl);
+  } else {
+    getMachineGuid();
+  }
 
   // Send immediately on activate
   void collectAndSend();
