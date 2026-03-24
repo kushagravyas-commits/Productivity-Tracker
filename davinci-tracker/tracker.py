@@ -54,6 +54,8 @@ def main():
     
     print("Starting DaVinci Resolve Productivity Tracker...")
     machine_guid = get_machine_guid()
+    print(f"Tracker machine GUID: {machine_guid}")
+    print(f"Posting app context to: {API_URL}")
     headers = {
         "X-Machine-GUID": machine_guid,
         "Content-Type": "application/json"
@@ -64,6 +66,7 @@ def main():
             resolve = get_resolve()
             if not resolve:
                 # Resolve not running or API not enabled in preferences
+                print("Resolve API unavailable (check DaVinci scripting preference + installation paths)")
                 time.sleep(POLL_INTERVAL * 2)
                 continue
                 
@@ -85,10 +88,12 @@ def main():
                 
                 try:
                     res = requests.post(API_URL, json=payload, headers=headers, timeout=5)
-                    if res.status_code != 200:
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Agent error: {res.status_code}")
-                except requests.RequestException:
-                    pass # Background agent might be down
+                    if res.status_code == 200:
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] App context sent: project={project_name} timeline={timeline_name}")
+                    else:
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Agent error: {res.status_code} body={res.text[:200]}")
+                except requests.RequestException as e:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Post failed: {e}")
                     
             time.sleep(POLL_INTERVAL)
         except Exception as e:

@@ -224,11 +224,11 @@ function startDavinciTracker() {
     console.log(`DaVinci tracker not found: ${trackerPath}`)
     return
   }
-  if (!app.isPackaged) {
-    try { fs.chmodSync(trackerPath, '755') } catch (e) {}
-  }
+  try { fs.chmodSync(trackerPath, '755') } catch (e) {}
   console.log(`Starting DaVinci tracker: ${trackerPath}`)
   davinciProcess = execFile(trackerPath, [])
+  davinciProcess.stdout?.on('data', (data) => console.log(`[DaVinci] ${data}`))
+  davinciProcess.stderr?.on('data', (data) => console.error(`[DaVinci] ${data}`))
   davinciProcess.on('error', (err) => console.error('DaVinci tracker start error:', err))
   davinciProcess.on('exit', (code) => {
     console.log(`DaVinci tracker exited with code ${code}`)

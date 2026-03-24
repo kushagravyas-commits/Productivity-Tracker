@@ -249,6 +249,8 @@ function startDavinciTracker() {
   }
   console.log(`Starting DaVinci tracker: ${trackerPath}`)
   davinciProcess = execFile(trackerPath, [], { windowsHide: true })
+  davinciProcess.stdout?.on('data', (data) => console.log(`[DaVinci] ${data}`))
+  davinciProcess.stderr?.on('data', (data) => console.error(`[DaVinci] ${data}`))
   davinciProcess.on('error', (err) => console.error('DaVinci tracker start error:', err))
   davinciProcess.on('exit', (code) => {
     console.log(`DaVinci tracker exited with code ${code}`)
