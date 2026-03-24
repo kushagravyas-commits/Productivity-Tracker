@@ -34,6 +34,14 @@
       {
         "from": "../dist_bin/TrackFlowAgent.exe",
         "to": "server/TrackFlowAgent.exe"
+      },
+      {
+        "from": "../dist_bin/TrackFlowDaVinci.exe",
+        "to": "server/TrackFlowDaVinci.exe"
+      },
+      {
+        "from": "../adobe-plugin",
+        "to": "server/adobe-plugin"
       }
     ],
     "files": [

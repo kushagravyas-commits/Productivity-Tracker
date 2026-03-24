@@ -29,6 +29,14 @@
       {
         "from": "../dist_bin_mac/TrackFlowAgent",
         "to": "server/TrackFlowAgent"
+      },
+      {
+        "from": "../dist_bin_mac/TrackFlowDaVinci",
+        "to": "server/TrackFlowDaVinci"
+      },
+      {
+        "from": "../adobe-plugin",
+        "to": "server/adobe-plugin"
       }
     ],
     "files": [

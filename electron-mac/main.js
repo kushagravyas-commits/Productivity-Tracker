@@ -35,6 +35,7 @@ function killByScript(scriptName) {
 function cleanupOldProcesses() {
   killByName(SERVER_BIN)
   killByName(AGENT_BIN)
+  killByName('TrackFlowDaVinci')
   killByPort(PORT)
   killByPort(5173) // Frontend dev server
   killByPort(10101) // Legacy proxy
@@ -47,7 +48,7 @@ function killProcesses() {
   app.isQuitting = true
 
   // 1. Kill tracked child processes by PID
-  for (const proc of [serverProcess, agentProcess]) {
+  for (const proc of [serverProcess, agentProcess, davinciProcess]) {
     if (proc && proc.pid) {
       try {
         execSync(`kill -9 ${proc.pid}`, { stdio: 'ignore' })
@@ -56,10 +57,12 @@ function killProcesses() {
   }
   serverProcess = null
   agentProcess = null
+  davinciProcess = null
 
   // 2. Kill by executable name (packaged mode)
   killByName(SERVER_BIN)
   killByName(AGENT_BIN)
+  killByName('TrackFlowDaVinci')
 
   // 3. Kill by port
   killByPort(PORT)
@@ -140,6 +143,7 @@ let mainWindow = null
 let tray = null
 let serverProcess = null
 let agentProcess = null
+let davinciProcess = null
 let deviceRole = null
 
 // --- Locate bundled binaries ---
@@ -148,6 +152,21 @@ function getResourcePath(filename) {
     return path.join(process.resourcesPath, 'server', filename)
   }
   return path.join(__dirname, '..', 'dist_bin_mac', filename)
+}
+
+function installAdobePlugin() {
+  try {
+    const source = app.isPackaged
+      ? path.join(process.resourcesPath, 'server', 'adobe-plugin')
+      : path.join(__dirname, '..', 'adobe-plugin')
+    const target = path.join(app.getPath('home'), 'Library', 'Application Support', 'Adobe', 'CEP', 'extensions', 'TrackFlow')
+    if (!source || !fs.existsSync(source) || !target) return
+    fs.mkdirSync(target, { recursive: true })
+    fs.cpSync(source, target, { recursive: true, force: true })
+    console.log(`Adobe plugin installed: ${target}`)
+  } catch (e) {
+    console.error(`Adobe plugin install failed: ${e.message}`)
+  }
 }
 
 // --- Start FastAPI Server ---
@@ -195,6 +214,27 @@ function startAgent() {
     if (!app.isQuitting) {
       console.log('Auto-restarting agent in 2s...')
       setTimeout(() => startAgent(), 2000)
+    }
+  })
+}
+
+function startDavinciTracker() {
+  const trackerPath = getResourcePath('TrackFlowDaVinci')
+  if (!fs.existsSync(trackerPath)) {
+    console.log(`DaVinci tracker not found: ${trackerPath}`)
+    return
+  }
+  if (!app.isPackaged) {
+    try { fs.chmodSync(trackerPath, '755') } catch (e) {}
+  }
+  console.log(`Starting DaVinci tracker: ${trackerPath}`)
+  davinciProcess = execFile(trackerPath, [])
+  davinciProcess.on('error', (err) => console.error('DaVinci tracker start error:', err))
+  davinciProcess.on('exit', (code) => {
+    console.log(`DaVinci tracker exited with code ${code}`)
+    davinciProcess = null
+    if (!app.isQuitting) {
+      setTimeout(() => startDavinciTracker(), 3000)
     }
   })
 }
@@ -332,6 +372,8 @@ app.whenReady().then(async () => {
   // Start server + agent
   startServer()
   startAgent()
+  installAdobePlugin()
+  startDavinciTracker()
 
   // Wait for server to be ready
   try {

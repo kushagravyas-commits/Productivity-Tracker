@@ -12,10 +12,12 @@ def get_resolve():
         import DaVinciResolveScript as bmd
         return bmd.scriptapp("Resolve")
     except ImportError:
-        # Check standard installation paths for Windows
+        # Check standard installation paths for Windows and macOS
         paths = [
             r"C:\Program Files\Blackmagic Design\DaVinci Resolve\Developer\Scripting\Modules",
-            r"C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules"
+            r"C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules",
+            "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules",
+            "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/Modules",
         ]
         for p in paths:
             if p not in sys.path:

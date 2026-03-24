@@ -12,6 +12,7 @@ BACKEND_DIR = ROOT_DIR / "backend"
 AGENT_DIR = ROOT_DIR / "agent"
 VSCODE_DIR = ROOT_DIR / "vscode-extension"
 CHROME_DIR = ROOT_DIR / "chrome-extension"
+DAVINCI_DIR = ROOT_DIR / "davinci-tracker"
 
 
 def clean():
@@ -123,6 +124,21 @@ def build_agent():
     os.chdir(ROOT_DIR)
 
 
+def build_davinci_tracker():
+    print("\n--- Packaging DaVinci Tracker ---")
+    os.chdir(DAVINCI_DIR)
+    cmd = [
+        "pyinstaller",
+        "--onefile",
+        "--noconsole",
+        "--name=TrackFlowDaVinci",
+        "tracker.py",
+    ]
+    subprocess.run(cmd, check=True)
+    shutil.copy(Path("dist") / "TrackFlowDaVinci.exe", DIST_DIR / "TrackFlowDaVinci.exe")
+    os.chdir(ROOT_DIR)
+
+
 if __name__ == "__main__":
     try:
         clean()
@@ -130,10 +146,12 @@ if __name__ == "__main__":
         build_frontend()
         build_backend()
         build_agent()
+        build_davinci_tracker()
         print(f"\n{'='*60}")
         print(f"SUCCESS! Binaries are in: {DIST_DIR.absolute()}")
         print(f"  - {APP_NAME}Server.exe  (Admin Dashboard + API)")
         print(f"  - {APP_NAME}Agent.exe   (Collector + Extensions)")
+        print("  - TrackFlowDaVinci.exe  (DaVinci app-context tracker)")
         print(f"{'='*60}")
     except Exception as e:
         print(f"\nBUILD FAILED: {e}")
