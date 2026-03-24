@@ -27,7 +27,15 @@ def get_resolve():
             return None
 
 def get_machine_guid() -> str:
-    """Get unique machine GUID from Windows registry."""
+    """Get stable machine GUID across platforms."""
+    if sys.platform == "darwin":
+        try:
+            cmd = "ioreg -rd1 -c IOPlatformExpertDevice | awk '/IOPlatformUUID/ { split($0, line, \"\\\"\"); printf(\"%s\", line[4]); }'"
+            out = os.popen(cmd).read().strip()
+            if out:
+                return out
+        except:
+            pass
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography")
@@ -39,7 +47,7 @@ def get_machine_guid() -> str:
         return str(uuid.getnode())
 
 def main():
-    API_URL = "http://127.0.0.1:10101/api/v1/context/app"
+    API_URL = "http://127.0.0.1:8080/api/v1/context/app"
     POLL_INTERVAL = 5 # seconds
     
     print("Starting DaVinci Resolve Productivity Tracker...")
