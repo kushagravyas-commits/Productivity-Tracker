@@ -28,6 +28,18 @@ function tryLoadMacGuidFromAgentConfig(): string | null {
     }
 }
 
+function tryReadMacHardwareGuid(): string | null {
+    try {
+        const out = cp.execSync(
+            `ioreg -rd1 -c IOPlatformExpertDevice | awk '/IOPlatformUUID/ { split($0, line, "\\""); printf("%s", line[4]); }'`,
+            { stdio: ['ignore', 'pipe', 'ignore'] },
+        ).toString().trim();
+        return out || null;
+    } catch {
+        return null;
+    }
+}
+
 function getMachineGuid(): string {
     if (_machineGuid) return _machineGuid;
     // Try reading from Windows registry
@@ -51,8 +63,14 @@ function getMachineGuid(): string {
             _machineGuidReady = true;
             return _machineGuid;
         }
+        const hardwareGuid = tryReadMacHardwareGuid();
+        if (hardwareGuid) {
+            _machineGuid = hardwareGuid;
+            _machineGuidReady = true;
+            return _machineGuid;
+        }
         // On macOS, avoid emitting vscode machineId as device identity.
-        // Wait for local TrackFlow agent config to provide hardware UUID.
+        // Wait for local TrackFlow agent config / hardware UUID to become readable.
         return '';
     }
     return vscode.env.machineId;

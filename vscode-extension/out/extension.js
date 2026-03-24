@@ -39,9 +39,34 @@ const vscode = __importStar(require("vscode"));
 const http = __importStar(require("http"));
 const https = __importStar(require("https"));
 const path = __importStar(require("path"));
+const fs = __importStar(require("fs"));
+const os = __importStar(require("os"));
 const cp = __importStar(require("child_process"));
 let _machineGuid = null;
 let _machineGuidReady = false;
+function tryLoadMacGuidFromAgentConfig() {
+    try {
+        const configPath = path.join(os.homedir(), 'Library', 'Application Support', 'TrackFlow', 'agent_config.json');
+        if (!fs.existsSync(configPath))
+            return null;
+        const raw = fs.readFileSync(configPath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        const guid = typeof parsed?.machine_guid === 'string' ? parsed.machine_guid.trim() : '';
+        return guid || null;
+    }
+    catch {
+        return null;
+    }
+}
+function tryReadMacHardwareGuid() {
+    try {
+        const out = cp.execSync(`ioreg -rd1 -c IOPlatformExpertDevice | awk '/IOPlatformUUID/ { split($0, line, "\\""); printf("%s", line[4]); }'`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+        return out || null;
+    }
+    catch {
+        return null;
+    }
+}
 function getMachineGuid() {
     if (_machineGuid)
         return _machineGuid;
@@ -60,11 +85,26 @@ function getMachineGuid() {
     catch {
         // Registry failed — will be resolved by backend fetch
     }
+    if (process.platform === 'darwin') {
+        const macGuid = tryLoadMacGuidFromAgentConfig();
+        if (macGuid) {
+            _machineGuid = macGuid;
+            _machineGuidReady = true;
+            return _machineGuid;
+        }
+        const hardwareGuid = tryReadMacHardwareGuid();
+        if (hardwareGuid) {
+            _machineGuid = hardwareGuid;
+            _machineGuidReady = true;
+            return _machineGuid;
+        }
+        // On macOS, avoid emitting vscode machineId as device identity.
+        // Wait for local TrackFlow agent config / hardware UUID to become readable.
+        return '';
+    }
     return vscode.env.machineId;
 }
 function fetchMachineGuidFromBackend(apiUrl, retries = 10) {
-    if (_machineGuidReady)
-        return;
     try {
         const url = new URL('/api/v1/machine-guid', apiUrl);
         http.get({ hostname: url.hostname, port: parseInt(url.port) || 8080, path: url.pathname, timeout: 3000 }, (res) => {
@@ -74,8 +114,11 @@ function fetchMachineGuidFromBackend(apiUrl, retries = 10) {
                 try {
                     const data = JSON.parse(body);
                     if (data.machine_guid) {
-                        _machineGuid = data.machine_guid;
-                        _machineGuidReady = true;
+                        if (_machineGuid !== data.machine_guid) {
+                            console.log(`[TrackFlow] Synced Machine GUID from backend: ${data.machine_guid}`);
+                            _machineGuid = data.machine_guid;
+                            _machineGuidReady = true;
+                        }
                         return;
                     }
                 }
@@ -174,6 +217,19 @@ async function collectAndSend() {
 }
 function sendPayload(apiUrl, context, isRetry = false) {
     try {
+        if (process.platform === 'darwin' && !_machineGuidReady) {
+            if (!isRetry) {
+                _lastFailedPayload = { apiUrl, context };
+            }
+            return;
+        }
+        const machineGuid = getMachineGuid();
+        if (!machineGuid) {
+            if (!isRetry) {
+                _lastFailedPayload = { apiUrl, context };
+            }
+            return;
+        }
         const body = JSON.stringify(context);
         const url = new URL('/api/v1/context/editor', apiUrl);
         const isHttps = url.protocol === 'https:';
@@ -188,7 +244,7 @@ function sendPayload(apiUrl, context, isRetry = false) {
             headers: {
                 'Content-Type': 'application/json',
                 'Content-Length': Buffer.byteLength(body),
-                'X-Machine-GUID': getMachineGuid(),
+                'X-Machine-GUID': machineGuid,
             },
         };
         const req = client.request(options);
@@ -220,8 +276,14 @@ function activate(context) {
     const config = vscode.workspace.getConfiguration('trackflow');
     const intervalMs = (config.get('intervalSeconds') ?? 5) * 1000;
     const apiUrl = config.get('apiUrl') ?? 'http://127.0.0.1:8080';
-    // Fetch machine GUID from backend (fallback if registry fails)
-    fetchMachineGuidFromBackend(apiUrl);
+    // On macOS, use local agent config GUID to avoid binding to server machine identity.
+    // Keep backend GUID sync for Windows and other platforms.
+    if (process.platform !== 'darwin') {
+        fetchMachineGuidFromBackend(apiUrl);
+    }
+    else {
+        getMachineGuid();
+    }
     // Send immediately on activate
     void collectAndSend();
     // Then poll on interval
