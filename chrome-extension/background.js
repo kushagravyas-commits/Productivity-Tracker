@@ -28,8 +28,9 @@ async function fetchMachineGuid() {
       return;
     }
   } catch { /* backend not ready yet */ }
-  // Fallback: use cached or generate temporary
-  if (!machineGuid) {
+  // Fallback: only generate temporary IDs on non-macOS platforms.
+  // On macOS we must wait for canonical hardware UUID to avoid ID fragmentation.
+  if (!machineGuid && navigator.platform !== 'MacIntel') {
     machineGuid = crypto.randomUUID();
   }
 }
@@ -93,6 +94,13 @@ async function flushRetryQueue(headers) {
 
 async function collectAndSend() {
   try {
+    if (!machineGuid && navigator.platform === 'MacIntel') {
+      await fetchMachineGuid();
+      if (!machineGuid) {
+        return;
+      }
+    }
+
     const [allTabs, activeTabs] = await Promise.all([
       chrome.tabs.query({}),
       chrome.tabs.query({ active: true, currentWindow: true }),

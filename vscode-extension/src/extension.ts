@@ -23,6 +23,11 @@ function getMachineGuid(): string {
     } catch {
         // Registry failed — will be resolved by backend fetch
     }
+    if (process.platform === 'darwin') {
+        // On macOS, avoid emitting vscode machineId as device identity.
+        // Wait for backend-provided hardware UUID so context matches agent events.
+        return '';
+    }
     return vscode.env.machineId;
 }
 
@@ -155,6 +160,21 @@ async function collectAndSend(): Promise<void> {
 
 function sendPayload(apiUrl: string, context: EditorContext, isRetry = false): void {
   try {
+    if (process.platform === 'darwin' && !_machineGuidReady) {
+      if (!isRetry) {
+        _lastFailedPayload = { apiUrl, context };
+      }
+      return;
+    }
+
+    const machineGuid = getMachineGuid();
+    if (!machineGuid) {
+      if (!isRetry) {
+        _lastFailedPayload = { apiUrl, context };
+      }
+      return;
+    }
+
     const body = JSON.stringify(context);
     const url = new URL('/api/v1/context/editor', apiUrl);
     const isHttps = url.protocol === 'https:';
@@ -170,7 +190,7 @@ function sendPayload(apiUrl: string, context: EditorContext, isRetry = false): v
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body),
-        'X-Machine-GUID': getMachineGuid(),
+        'X-Machine-GUID': machineGuid,
       },
     };
     const req = client.request(options);

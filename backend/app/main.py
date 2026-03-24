@@ -254,11 +254,12 @@ def get_backend_machine_guid():
             key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography")
             guid, _ = winreg.QueryValueEx(key, "MachineGuid")
             return {"machine_guid": guid}
-        elif sys.platform == "darwin":
+        if sys.platform == "darwin":
             import subprocess
             cmd = "ioreg -rd1 -c IOPlatformExpertDevice | awk '/IOPlatformUUID/ { split($0, line, \"\\\"\"); printf(\"%s\", line[4]); }'"
             out = subprocess.check_output(cmd, shell=True).decode().strip()
-            if out: return {"machine_guid": out}
+            if out:
+                return {"machine_guid": out}
     except Exception as e:
         print(f"Error getting machine guid: {e}")
     return {"machine_guid": None}
@@ -317,24 +318,6 @@ async def register_device(reg: DeviceRegisterIn) -> RegisterResponse:
                 resp.message = "Device registered and assigned."
 
     return resp
-
-
-@app.get("/api/v1/machine-guid", tags=["registration"])
-async def get_machine_guid() -> dict:
-    """Read this machine's Windows Machine GUID from the registry."""
-    import subprocess
-    try:
-        out = subprocess.check_output(
-            ['reg', 'query', r'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Cryptography', '/v', 'MachineGuid'],
-            encoding='utf-8', stderr=subprocess.DEVNULL,
-        )
-        for line in out.splitlines():
-            if 'MachineGuid' in line:
-                parts = line.strip().split()
-                return {"machine_guid": parts[-1]}
-    except Exception:
-        pass
-    return {"machine_guid": None}
 
 
 @app.get("/api/v1/device-role/{machine_guid}", tags=["registration"])
