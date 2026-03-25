@@ -250,6 +250,16 @@ export default function DeepActivity({ day, editorContext, browserContext, appCo
   const navApps = category === 'editor' ? editorApps : category === 'browser' ? browserApps : genericApps
   const activeApp = category === 'editor' ? activeEditorApp : category === 'browser' ? activeBrowserApp : activeGenericApp
 
+  // If the user selected an app from a different tab (e.g. VS Code), switching to another
+  // category can make the selection invalid and hide existing data. Auto-correct in that case.
+  useEffect(() => {
+    if (!selectedApp) return
+    if (navApps.length === 0) return
+    if (!navApps.includes(selectedApp)) {
+      setSelectedApp(null)
+    }
+  }, [category, day, navApps, selectedApp])
+
   return (
     <div className="page-shell">
       {/* Header */}
