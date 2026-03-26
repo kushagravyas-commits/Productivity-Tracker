@@ -1,4 +1,4 @@
-export type PageType = 'dashboard' | 'logs' | 'deep' | 'employees'
+export type PageType = 'dashboard' | 'logs' | 'deep' | 'employees' | 'teams' | 'team_dashboard'
 
 interface SidebarProps {
   currentPage: PageType
@@ -21,6 +21,7 @@ export default function Sidebar({
 }: SidebarProps) {
   let navItems: { id: PageType; icon: string; label: string }[] = [
     { id: 'employees', icon: '👥', label: 'Team Members' },
+    { id: 'teams', icon: '🏢', label: 'Teams' },
   ]
 
   if (isUserSelected) {

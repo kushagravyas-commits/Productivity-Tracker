@@ -24,6 +24,7 @@ else:
     _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(_base, ".env"))
 
+import asyncpg
 from fastapi import FastAPI, HTTPException, Query, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -56,6 +57,12 @@ from app.schemas import (
     DeviceAssignIn,
     UserRoleUpdateIn,
     RegisterResponse,
+    TeamIn,
+    TeamUpdateIn,
+    TeamItem,
+    TeamMemberSetIn,
+    TeamDashboardResponse,
+    TeamMemberSummary,
 )
 from app.services.analytics import (
     build_kpis,
@@ -165,12 +172,14 @@ async def create_user(user: UserIn) -> UserItem:
         role=row["role"],
         registration_token=row["registration_token"],
         created_at=row["created_at"],
+        team_ids=[],
     )
 
 
 @app.get("/api/v1/admin/users", response_model=list[UserItem], tags=["admin"])
 async def list_users() -> list[UserItem]:
     rows = await neon_db.list_users()
+    team_map = await neon_db.user_id_to_team_ids_map()
     return [
         UserItem(
             id=r["id"],
@@ -179,6 +188,7 @@ async def list_users() -> list[UserItem]:
             role=r.get("role") or "employee",
             registration_token=r["registration_token"],
             created_at=r["created_at"],
+            team_ids=team_map.get(int(r["id"]), []),
         )
         for r in rows
     ]
@@ -242,6 +252,178 @@ async def assign_device(machine_guid: str, payload: DeviceAssignIn) -> MessageRe
     device = await neon_db.upsert_device(machine_guid, payload.email, None)
     await neon_db.link_device_to_user(machine_guid, user["id"], payload.email)
     return MessageResponse(message=f"Device {machine_guid[:8]} assigned to {payload.email}")
+
+
+async def build_team_dashboard(team_id: int, day: date) -> TeamDashboardResponse:
+    team = await neon_db.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    user_ids = await neon_db.get_team_user_ids(team_id)
+    team_name = team["name"]
+    if not user_ids:
+        empty = DashboardResponse(
+            day=day,
+            kpis=build_kpis([], 0),
+            top_apps=[],
+            timeline=[],
+            productivity_breakdown={"productive": 0, "neutral": 0, "distracting": 0, "idle": 0},
+            summary="No members in this team yet.",
+        )
+        return TeamDashboardResponse(
+            team_id=team_id,
+            team_name=team_name,
+            day=day,
+            aggregate=empty,
+            members=[],
+        )
+    all_device_ids = await neon_db.get_machine_guids_for_user_ids(user_ids)
+    day_events = [dict(r) for r in await neon_db.fetch_events_for_devices(day, all_device_ids)]
+    day_idle = [dict(r) for r in await neon_db.fetch_idle_for_devices(day, all_device_ids)]
+    idle_seconds = sum(clamp_duration_seconds(r["started_at"], r["ended_at"]) for r in day_idle)
+    aggregate = DashboardResponse(
+        day=day,
+        kpis=build_kpis(day_events, idle_seconds),
+        top_apps=build_top_app_items(day_events),
+        timeline=build_timeline(day_events, day_idle),
+        productivity_breakdown=build_productivity_breakdown(day_events, idle_seconds),
+        summary=summarize_day(day_events, idle_seconds),
+    )
+    members: list[TeamMemberSummary] = []
+    for uid in user_ids:
+        guids = await neon_db.get_machine_guids_for_user_id(uid)
+        urow = await neon_db.find_user_by_id(uid)
+        if not urow:
+            continue
+        ev = [dict(r) for r in await neon_db.fetch_events_for_devices(day, guids)]
+        idl = [dict(r) for r in await neon_db.fetch_idle_for_devices(day, guids)]
+        idle_s = sum(clamp_duration_seconds(r["started_at"], r["ended_at"]) for r in idl)
+        pb = build_productivity_breakdown(ev, idle_s)
+        total_minutes = int((pb.get("productive", 0) or 0) + (pb.get("neutral", 0) or 0) + (pb.get("distracting", 0) or 0) + (pb.get("idle", 0) or 0))
+
+        latest = await neon_db.fetch_latest_event_for_devices(day, guids)
+        current_app_name = latest["app_name"] if latest else None
+        current_window_title = latest.get("window_title") if latest else None
+        current_started_at = latest["started_at"] if latest else None
+        current_ended_at = latest["ended_at"] if latest else None
+        pdev = await neon_db.get_primary_device_for_user(uid)
+        mg = pdev["machine_guid"] if pdev else None
+        ls = pdev["last_seen_at"] if pdev else None
+        members.append(
+            TeamMemberSummary(
+                user_id=uid,
+                full_name=urow["full_name"],
+                email=urow["email"],
+                machine_guid=mg,
+                last_seen_at=ls,
+                productivity_breakdown=pb,
+                total_minutes=total_minutes,
+                current_app_name=current_app_name,
+                current_window_title=current_window_title,
+                current_started_at=current_started_at,
+                current_ended_at=current_ended_at,
+            )
+        )
+    return TeamDashboardResponse(
+        team_id=team_id,
+        team_name=team_name,
+        day=day,
+        aggregate=aggregate,
+        members=members,
+    )
+
+
+@app.get("/api/v1/admin/teams", response_model=list[TeamItem], tags=["admin"])
+async def admin_list_teams() -> list[TeamItem]:
+    rows = await neon_db.list_teams()
+    return [
+        TeamItem(
+            id=int(r["id"]),
+            name=r["name"],
+            created_at=r["created_at"],
+            created_by=r.get("created_by"),
+        )
+        for r in rows
+    ]
+
+
+@app.post("/api/v1/admin/teams", response_model=TeamItem, tags=["admin"])
+async def admin_create_team(payload: TeamIn) -> TeamItem:
+    try:
+        row = await neon_db.create_team(payload.name, None)
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(status_code=409, detail="A team with this name already exists")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return TeamItem(
+        id=int(row["id"]),
+        name=row["name"],
+        created_at=row["created_at"],
+        created_by=row.get("created_by"),
+    )
+
+
+@app.patch("/api/v1/admin/teams/{team_id}", response_model=TeamItem, tags=["admin"])
+async def admin_update_team(team_id: int, payload: TeamUpdateIn) -> TeamItem:
+    try:
+        n = await neon_db.update_team_name(team_id, payload.name)
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(status_code=409, detail="A team with this name already exists")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if n == 0:
+        raise HTTPException(status_code=404, detail="Team not found")
+    row = await neon_db.get_team(team_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Team not found")
+    return TeamItem(
+        id=int(row["id"]),
+        name=row["name"],
+        created_at=row["created_at"],
+        created_by=row.get("created_by"),
+    )
+
+
+@app.delete("/api/v1/admin/teams/{team_id}", response_model=MessageResponse, tags=["admin"])
+async def admin_delete_team(team_id: int) -> MessageResponse:
+    n = await neon_db.delete_team(team_id)
+    if n == 0:
+        raise HTTPException(status_code=404, detail="Team not found")
+    return MessageResponse(message="Team deleted")
+
+
+@app.get("/api/v1/admin/teams/{team_id}/members", response_model=list[UserItem], tags=["admin"])
+async def admin_get_team_members(team_id: int) -> list[UserItem]:
+    team = await neon_db.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    rows = await neon_db.get_team_members_with_users(team_id)
+    team_map = await neon_db.user_id_to_team_ids_map()
+    return [
+        UserItem(
+            id=int(r["id"]),
+            full_name=r["full_name"],
+            email=r["email"],
+            role=r.get("role") or "employee",
+            registration_token=r["registration_token"],
+            created_at=r["created_at"],
+            team_ids=team_map.get(int(r["id"]), []),
+        )
+        for r in rows
+    ]
+
+
+@app.put("/api/v1/admin/teams/{team_id}/members", response_model=MessageResponse, tags=["admin"])
+async def admin_set_team_members(team_id: int, payload: TeamMemberSetIn) -> MessageResponse:
+    team = await neon_db.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    await neon_db.set_team_members(team_id, payload.user_ids)
+    return MessageResponse(message="Team members updated")
+
+
+@app.get("/api/v1/admin/teams/{team_id}/dashboard/{day}", response_model=TeamDashboardResponse, tags=["admin"])
+async def admin_team_dashboard(team_id: int, day: date) -> TeamDashboardResponse:
+    return await build_team_dashboard(team_id, day)
 
 
 @app.get("/api/v1/machine-guid", tags=["registration"])

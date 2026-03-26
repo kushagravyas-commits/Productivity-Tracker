@@ -10,6 +10,8 @@ import Dashboard from './pages/Dashboard'
 import Logs from './pages/Logs'
 import DeepActivity from './pages/DeepActivity'
 import Users from './pages/Users'
+import Teams from './pages/Teams'
+import TeamDashboard from './pages/TeamDashboard'
 import AdminActivation from './pages/AdminActivation'
 import type { DashboardResponse } from './types'
 
@@ -43,6 +45,7 @@ export default function App() {
   const [currentPage, setCurrentPage] = useState<PageType>('employees')
   const [day, setDay] = useState(todayString())
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | undefined>(undefined)
+  const [selectedTeam, setSelectedTeam] = useState<{ id: number; name: string } | null>(null)
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null)
   const [weeklyBreakdowns, setWeeklyBreakdowns] = useState<WeeklyBreakdown[]>([])
   const [editorContext, setEditorContext] = useState<EditorContextItem[]>([])
@@ -132,14 +135,14 @@ export default function App() {
   useEffect(() => {
     if (!adminStatus?.is_setup) return
 
-    // Safety: If no user selected, must stay on employees page
-    if (selectedDeviceId === undefined && currentPage !== 'employees') {
+    // Safety: If no device selected, only employees / teams pages are valid
+    if (selectedDeviceId === undefined && currentPage !== 'employees' && currentPage !== 'teams' && currentPage !== 'team_dashboard') {
       setCurrentPage('employees')
       return
     }
 
-    // Skip heavy data fetching when on employees page (no device selected)
-    if (currentPage === 'employees') return
+    // Skip heavy data fetching when on admin list pages (no device selected)
+    if (currentPage === 'employees' || currentPage === 'teams' || currentPage === 'team_dashboard') return
 
     // Reset incremental refs on day/device change
     lastEditorTs.current = null
@@ -175,7 +178,7 @@ export default function App() {
   }, [day, selectedDeviceId, adminStatus?.is_setup, currentPage])
 
   useEffect(() => {
-    if (!isToday || !adminStatus?.is_setup || currentPage === 'employees') return undefined
+    if (!isToday || !adminStatus?.is_setup || currentPage === 'employees' || currentPage === 'teams' || currentPage === 'team_dashboard') return undefined
     const id = window.setInterval(() => {
       if (!initialFetchDone.current) return
       void load(day, { silent: true })
@@ -276,12 +279,13 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      {selectedDeviceId !== undefined && (
+      {adminStatus?.is_setup && (
         <NavTabs
           currentPage={currentPage}
           onPageChange={(page) => {
-            if (page === 'employees') {
+            if (page === 'employees' || page === 'teams') {
               setSelectedDeviceId(undefined)
+              setSelectedTeam(null)
             }
             setCurrentPage(page)
           }}
@@ -321,10 +325,37 @@ export default function App() {
           <Users 
             onSelectUser={(machineGuid) => {
               setSelectedDeviceId(machineGuid)
+              setSelectedTeam(null)
               setCurrentPage('dashboard')
             }} 
             isDarkMode={isDarkMode}
             onThemeToggle={() => setIsDarkMode(!isDarkMode)}
+          />
+        ) : currentPage === 'teams' ? (
+          <Teams
+            onViewDashboard={(team) => {
+              setSelectedDeviceId(undefined)
+              setSelectedTeam({ id: team.id, name: team.name })
+              setCurrentPage('team_dashboard')
+            }}
+            isDarkMode={isDarkMode}
+            onThemeToggle={() => setIsDarkMode(!isDarkMode)}
+          />
+        ) : currentPage === 'team_dashboard' ? (
+          <TeamDashboard
+            teamId={selectedTeam?.id ?? 0}
+            teamName={selectedTeam?.name ?? 'Team'}
+            day={day}
+            onDayChange={setDay}
+            onLoadToday={handleLoadToday}
+            onBack={() => {
+              setSelectedTeam(null)
+              setCurrentPage('teams')
+            }}
+            onSelectUser={(machineGuid) => {
+              setSelectedDeviceId(machineGuid)
+              setCurrentPage('dashboard')
+            }}
           />
         ) : (
           <DeepActivity

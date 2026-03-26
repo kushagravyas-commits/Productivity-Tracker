@@ -185,6 +185,7 @@ class UserItem(BaseModel):
     role: Literal["admin", "employee"]
     registration_token: str
     created_at: datetime
+    team_ids: list[int] = Field(default_factory=list)
 
 
 class DeviceRegisterIn(BaseModel):
@@ -231,3 +232,47 @@ class RegisterResponse(BaseModel):
     role: str | None = None
     mongodb_uri: str | None = None
     mongodb_db: str | None = None
+
+
+# --- Teams ---
+
+
+class TeamIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class TeamUpdateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class TeamItem(BaseModel):
+    id: int
+    name: str
+    created_at: datetime
+    created_by: str | None = None
+
+
+class TeamMemberSetIn(BaseModel):
+    user_ids: list[int] = Field(default_factory=list)
+
+
+class TeamMemberSummary(BaseModel):
+    user_id: int
+    full_name: str
+    email: str
+    machine_guid: str | None = None
+    last_seen_at: datetime | None = None
+    productivity_breakdown: dict[str, int]
+    total_minutes: int = 0
+    current_app_name: str | None = None
+    current_window_title: str | None = None
+    current_started_at: datetime | None = None
+    current_ended_at: datetime | None = None
+
+
+class TeamDashboardResponse(BaseModel):
+    team_id: int
+    team_name: str
+    day: date
+    aggregate: DashboardResponse
+    members: list[TeamMemberSummary]

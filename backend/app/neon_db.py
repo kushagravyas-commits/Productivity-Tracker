@@ -1,14 +1,16 @@
 """Neon PostgreSQL — single database for all TrackFlow data.
 
-Replaces MongoDB Atlas entirely. All 7 tables live here:
+Replaces MongoDB Atlas entirely. Core tables:
   events, idle_periods, users, devices,
-  editor_context, browser_context, app_context
+  editor_context, browser_context, app_context,
+  teams, team_members
 """
 from __future__ import annotations
 
 import os
 import re
 import uuid
+from collections import defaultdict
 from datetime import date, datetime
 from typing import Any
 
@@ -135,6 +137,21 @@ async def _create_tables() -> None:
                 notes            TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_ac_device_captured ON app_context (device_id, captured_at);
+
+            CREATE TABLE IF NOT EXISTS teams (
+                id          BIGSERIAL PRIMARY KEY,
+                name        TEXT NOT NULL UNIQUE,
+                created_at  TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                created_by  TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS team_members (
+                team_id   BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+                user_id   BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                added_at  TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (team_id, user_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members (user_id);
         """)
 
 
@@ -222,12 +239,75 @@ async def fetch_idle(day: date, device_id: str | None) -> list[asyncpg.Record]:
     )
 
 
+async def fetch_events_for_devices(day: date, device_ids: list[str]) -> list[asyncpg.Record]:
+    """Events for a day across many device_ids (machine_guid)."""
+    if not _pool or not device_ids:
+        return []
+    start = datetime(day.year, day.month, day.day, 0, 0, 0)
+    end = datetime(day.year, day.month, day.day, 23, 59, 59)
+    return await _pool.fetch(
+        """
+        SELECT * FROM events
+        WHERE device_id = ANY($1::text[])
+          AND started_at >= $2 AND started_at <= $3
+        ORDER BY started_at
+        """,
+        device_ids,
+        start,
+        end,
+    )
+
+async def fetch_latest_event_for_devices(day: date, device_ids: list[str]) -> asyncpg.Record | None:
+    """Latest event within the given day for any of the device_ids."""
+    if not _pool or not device_ids:
+        return None
+    start = datetime(day.year, day.month, day.day, 0, 0, 0)
+    end = datetime(day.year, day.month, day.day, 23, 59, 59)
+    return await _pool.fetchrow(
+        """
+        SELECT *
+        FROM events
+        WHERE device_id = ANY($1::text[])
+          AND started_at >= $2 AND started_at <= $3
+        ORDER BY started_at DESC
+        LIMIT 1
+        """,
+        device_ids,
+        start,
+        end,
+    )
+
+
+async def fetch_idle_for_devices(day: date, device_ids: list[str]) -> list[asyncpg.Record]:
+    if not _pool or not device_ids:
+        return []
+    start = datetime(day.year, day.month, day.day, 0, 0, 0)
+    end = datetime(day.year, day.month, day.day, 23, 59, 59)
+    return await _pool.fetch(
+        """
+        SELECT * FROM idle_periods
+        WHERE device_id = ANY($1::text[])
+          AND started_at >= $2 AND started_at <= $3
+        ORDER BY started_at
+        """,
+        device_ids,
+        start,
+        end,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Users
 # ---------------------------------------------------------------------------
 
 async def find_user_by_email(email: str) -> asyncpg.Record | None:
     return await _pool.fetchrow("SELECT * FROM users WHERE email=$1", email)
+
+
+async def find_user_by_id(user_id: int) -> asyncpg.Record | None:
+    if not _pool:
+        return None
+    return await _pool.fetchrow("SELECT * FROM users WHERE id=$1", user_id)
 
 
 async def find_user_by_token(token: str) -> asyncpg.Record | None:
@@ -275,6 +355,131 @@ async def update_user(_email: str, **fields: Any) -> int:
 async def delete_user(email: str) -> int:
     result = await _pool.execute("DELETE FROM users WHERE email=$1", email)
     return int(result.split()[-1])
+
+
+async def user_id_to_team_ids_map() -> dict[int, list[int]]:
+    """Map user_id -> list of team_ids (for admin list users)."""
+    if not _pool:
+        return {}
+    rows = await _pool.fetch("SELECT user_id, team_id FROM team_members")
+    m: dict[int, list[int]] = defaultdict(list)
+    for r in rows:
+        m[int(r["user_id"])].append(int(r["team_id"]))
+    return dict(m)
+
+
+# ---------------------------------------------------------------------------
+# Teams
+# ---------------------------------------------------------------------------
+
+
+async def list_teams() -> list[asyncpg.Record]:
+    if not _pool:
+        return []
+    return await _pool.fetch("SELECT * FROM teams ORDER BY LOWER(name)")
+
+
+async def get_team(team_id: int) -> asyncpg.Record | None:
+    if not _pool:
+        return None
+    return await _pool.fetchrow("SELECT * FROM teams WHERE id=$1", team_id)
+
+
+async def create_team(name: str, created_by: str | None) -> asyncpg.Record:
+    return await _pool.fetchrow(
+        "INSERT INTO teams (name, created_by) VALUES ($1, $2) RETURNING *",
+        name.strip(),
+        created_by,
+    )
+
+
+async def update_team_name(team_id: int, name: str) -> int:
+    result = await _pool.execute(
+        "UPDATE teams SET name=$2 WHERE id=$1",
+        team_id,
+        name.strip(),
+    )
+    return int(result.split()[-1])
+
+
+async def delete_team(team_id: int) -> int:
+    result = await _pool.execute("DELETE FROM teams WHERE id=$1", team_id)
+    return int(result.split()[-1])
+
+
+async def get_team_user_ids(team_id: int) -> list[int]:
+    if not _pool:
+        return []
+    rows = await _pool.fetch(
+        "SELECT user_id FROM team_members WHERE team_id=$1 ORDER BY user_id",
+        team_id,
+    )
+    return [int(r["user_id"]) for r in rows]
+
+
+async def get_team_members_with_users(team_id: int) -> list[asyncpg.Record]:
+    if not _pool:
+        return []
+    return await _pool.fetch(
+        """
+        SELECT u.id, u.full_name, u.email, u.role, u.registration_token, u.created_at, tm.added_at
+        FROM team_members tm
+        JOIN users u ON u.id = tm.user_id
+        WHERE tm.team_id = $1
+        ORDER BY u.full_name
+        """,
+        team_id,
+    )
+
+
+async def set_team_members(team_id: int, user_ids: list[int]) -> None:
+    async with _pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM team_members WHERE team_id=$1", team_id)
+            for uid in user_ids:
+                await conn.execute(
+                    """
+                    INSERT INTO team_members (team_id, user_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT (team_id, user_id) DO NOTHING
+                    """,
+                    team_id,
+                    uid,
+                )
+
+
+async def get_machine_guids_for_user_id(user_id: int) -> list[str]:
+    if not _pool:
+        return []
+    rows = await _pool.fetch(
+        "SELECT machine_guid FROM devices WHERE user_id=$1",
+        user_id,
+    )
+    return [r["machine_guid"] for r in rows if r.get("machine_guid")]
+
+
+async def get_machine_guids_for_user_ids(user_ids: list[int]) -> list[str]:
+    if not _pool or not user_ids:
+        return []
+    rows = await _pool.fetch(
+        "SELECT DISTINCT machine_guid FROM devices WHERE user_id = ANY($1::bigint[])",
+        user_ids,
+    )
+    return [r["machine_guid"] for r in rows if r.get("machine_guid")]
+
+
+async def get_primary_device_for_user(user_id: int) -> asyncpg.Record | None:
+    if not _pool:
+        return None
+    return await _pool.fetchrow(
+        """
+        SELECT * FROM devices
+        WHERE user_id=$1
+        ORDER BY last_seen_at DESC NULLS LAST
+        LIMIT 1
+        """,
+        user_id,
+    )
 
 
 # ---------------------------------------------------------------------------

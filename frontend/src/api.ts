@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { DashboardResponse, HistoryResponse } from './types'
+import type { DashboardResponse, HistoryResponse, ProductivityBreakdown } from './types'
 
 const baseURL = ''
 const api = axios.create({
@@ -61,6 +61,7 @@ export interface UserItem {
   role: 'admin' | 'employee'
   registration_token: string
   created_at: string
+  team_ids?: number[]
 }
 
 export interface DeviceItem {
@@ -116,6 +117,70 @@ export async function assignDevice(machine_guid: string, full_name: string, emai
 
 export async function deleteUser(email: string): Promise<void> {
   await api.delete(`/api/v1/admin/users/${email}`)
+}
+
+// --- Teams ---
+
+export interface TeamItem {
+  id: number
+  name: string
+  created_at: string
+  created_by: string | null
+}
+
+export interface TeamMemberSummary {
+  user_id: number
+  full_name: string
+  email: string
+  machine_guid: string | null
+  last_seen_at: string | null
+  productivity_breakdown: ProductivityBreakdown
+  total_minutes: number
+  current_app_name: string | null
+  current_window_title: string | null
+  current_started_at: string | null
+  current_ended_at: string | null
+}
+
+export interface TeamDashboardResponse {
+  team_id: number
+  team_name: string
+  day: string
+  aggregate: DashboardResponse
+  members: TeamMemberSummary[]
+}
+
+export async function listTeams(): Promise<TeamItem[]> {
+  const { data } = await api.get<TeamItem[]>('/api/v1/admin/teams')
+  return data
+}
+
+export async function createTeam(name: string): Promise<TeamItem> {
+  const { data } = await api.post<TeamItem>('/api/v1/admin/teams', { name })
+  return data
+}
+
+export async function updateTeam(teamId: number, name: string): Promise<TeamItem> {
+  const { data } = await api.patch<TeamItem>(`/api/v1/admin/teams/${teamId}`, { name })
+  return data
+}
+
+export async function deleteTeam(teamId: number): Promise<void> {
+  await api.delete(`/api/v1/admin/teams/${teamId}`)
+}
+
+export async function getTeamMembers(teamId: number): Promise<UserItem[]> {
+  const { data } = await api.get<UserItem[]>(`/api/v1/admin/teams/${teamId}/members`)
+  return data
+}
+
+export async function setTeamMembers(teamId: number, userIds: number[]): Promise<void> {
+  await api.put(`/api/v1/admin/teams/${teamId}/members`, { user_ids: userIds })
+}
+
+export async function getTeamDashboard(teamId: number, day: string): Promise<TeamDashboardResponse> {
+  const { data } = await api.get<TeamDashboardResponse>(`/api/v1/admin/teams/${teamId}/dashboard/${day}`)
+  return data
 }
 
 

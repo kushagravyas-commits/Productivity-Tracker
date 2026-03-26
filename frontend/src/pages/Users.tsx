@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { listUsers, createUser, listDevices, deleteUser, updateUserRole, updateUser, assignDevice, type UserItem, type DeviceItem } from '../api'
+import { useEffect, useMemo, useState } from 'react'
+import { listUsers, createUser, listDevices, listTeams, deleteUser, updateUserRole, updateUser, assignDevice, type UserItem, type DeviceItem, type TeamItem } from '../api'
 
 interface UsersProps {
   onSelectUser: (machineGuid: string) => void
@@ -10,6 +10,7 @@ interface UsersProps {
 export default function Users({ onSelectUser, isDarkMode, onThemeToggle }: UsersProps) {
   const [users, setUsers] = useState<UserItem[]>([])
   const [devices, setDevices] = useState<DeviceItem[]>([])
+  const [teams, setTeams] = useState<TeamItem[]>([])
   const [loading, setLoading] = useState(true)
   const [showAddForm, setShowAddForm] = useState(false)
   const [newName, setNewName] = useState('')
@@ -20,13 +21,28 @@ export default function Users({ onSelectUser, isDarkMode, onThemeToggle }: Users
   const [copiedToken, setCopiedToken] = useState(false)
   const [showAssignModal, setShowAssignModal] = useState<{ machine_guid: string } | null>(null)
   const [editingCard, setEditingCard] = useState<string | null>(null) // email of user being edited
+  const [teamFilter, setTeamFilter] = useState<'all' | 'no-team'>('all')
+
+  const filteredUsers = useMemo(() => {
+    if (teamFilter === 'no-team') {
+      return users.filter(u => !u.team_ids || u.team_ids.length === 0)
+    }
+    return users
+  }, [users, teamFilter])
+
+  const teamIdToName = useMemo(() => {
+    const m = new Map<number, string>()
+    teams.forEach(t => m.set(t.id, t.name))
+    return m
+  }, [teams])
 
   async function loadData() {
     try {
       setLoading(true)
-      const [u, d] = await Promise.all([listUsers(), listDevices()])
+      const [u, d, t] = await Promise.all([listUsers(), listDevices(), listTeams().catch(() => [])])
       setUsers(u)
       setDevices(d)
+      setTeams(t)
     } catch (err) {
       console.error(err)
     } finally {
@@ -120,7 +136,7 @@ export default function Users({ onSelectUser, isDarkMode, onThemeToggle }: Users
       <div className="page-header">
         <div className="page-header-left">
           <div className="eyebrow">Admin Panel</div>
-          <h1>Team Overview</h1>
+          <h1>Individual Employee Overview</h1>
           <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginTop: 4 }}>
             Monitor and manage your team members and their connected tracking devices.
           </p>
@@ -265,18 +281,43 @@ export default function Users({ onSelectUser, isDarkMode, onThemeToggle }: Users
         </div>
       )}
 
-      <div style={{ marginTop: 24 }}>
+      <div style={{ marginTop: 24, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 16 }}>
+        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Show:</span>
+        <button
+          type="button"
+          className={`btn ${teamFilter === 'all' ? 'btn-primary' : 'btn-ghost'}`}
+          style={{ padding: '4px 12px', fontSize: 12 }}
+          onClick={() => setTeamFilter('all')}
+        >
+          All employees
+        </button>
+        <button
+          type="button"
+          className={`btn ${teamFilter === 'no-team' ? 'btn-primary' : 'btn-ghost'}`}
+          style={{ padding: '4px 12px', fontSize: 12 }}
+          onClick={() => setTeamFilter('no-team')}
+        >
+          Not in any team
+        </button>
+      </div>
+
+      <div style={{ marginTop: 0 }}>
         {loading ? (
           <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)' }}>Loading team...</div>
         ) : users.length === 0 ? (
           <div className="card" style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)' }}>
             No employees added yet.
           </div>
+        ) : filteredUsers.length === 0 ? (
+          <div className="card" style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)' }}>
+            No employees match this filter.
+          </div>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 24 }}>
-            {users.map(u => {
+            {filteredUsers.map(u => {
               const userDevice = devices.find(d => d.email === u.email)
               const isEditing = editingCard === u.email
+              const teamNames = (u.team_ids ?? []).map(id => teamIdToName.get(id)).filter(Boolean) as string[]
               
               return (
                 <div key={u.email} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 16, border: isEditing ? '2px solid var(--accent)' : '1px solid var(--border)' }}>
@@ -298,6 +339,41 @@ export default function Users({ onSelectUser, isDarkMode, onThemeToggle }: Users
                         )}
                         <div className="badge" style={{ marginTop: 4, background: u.role === 'admin' ? 'rgba(0, 255, 127, 0.1)' : 'rgba(255, 255, 255, 0.05)', color: u.role === 'admin' ? '#00ffa3' : 'var(--text-secondary)', fontSize: 10 }}>
                           {u.role.toUpperCase()}
+                        </div>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                          {teamNames.length > 0 ? (
+                            teamNames.slice(0, 4).map((name) => (
+                              <span
+                                key={name}
+                                className="badge"
+                                style={{
+                                  background: 'rgba(99, 102, 241, 0.12)',
+                                  color: 'var(--text-secondary)',
+                                  fontSize: 10,
+                                }}
+                                title={name}
+                              >
+                                {name}
+                              </span>
+                            ))
+                          ) : (
+                            <span
+                              className="badge"
+                              style={{
+                                background: 'rgba(239, 68, 68, 0.12)',
+                                color: 'var(--text-secondary)',
+                                fontSize: 10,
+                              }}
+                              title="No team assigned"
+                            >
+                              Unassigned
+                            </span>
+                          )}
+                          {teamNames.length > 4 && (
+                            <span className="badge" style={{ background: 'rgba(255, 255, 255, 0.05)', color: 'var(--text-muted)', fontSize: 10 }}>
+                              +{teamNames.length - 4}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
