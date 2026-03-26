@@ -18,7 +18,7 @@ export default function AdminActivation({ onValidated }: AdminActivationProps) {
       await setupAdmin(email)
       onValidated(email)
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Verification failed. Please ensure you are an authorized administrator.')
+      setError(err.response?.data?.detail || 'Activation failed. Please try again.')
     } finally {
       setLoading(false)
     }

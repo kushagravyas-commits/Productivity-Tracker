@@ -184,8 +184,8 @@ async function waitForRole(machineGuid, maxAttempts = 30) {
     console.log(`Waiting for agent registration... (${i + 1}/${maxAttempts})`)
     await new Promise(r => setTimeout(r, 2000))
   }
-  console.log('Could not determine role, defaulting to employee')
-  return 'employee'
+  console.log('Could not determine role yet')
+  return null
 }
 
 let mainWindow = null
@@ -450,11 +450,16 @@ app.whenReady().then(async () => {
     removeFromStartup()
     createTray('admin')
     createWindow()
-  } else {
+  } else if (deviceRole === 'employee') {
     // EMPLOYEE: Hide to tray, auto-start on boot
     addToStartup()
     createTray('employee')
     // No window created — runs silently in background
+  } else {
+    // Unresolved role (unassigned/new device): open UI so user can complete onboarding.
+    removeFromStartup()
+    createTray('admin')
+    createWindow()
   }
 })
 

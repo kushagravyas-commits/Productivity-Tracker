@@ -11,13 +11,15 @@ const CAT_COLORS: Record<string, string> = {
 }
 
 export default function ActivityTimeline({ items }: Props) {
-  const { blocks, startHour, endHour } = useMemo(() => {
-    if (!items.length) return { blocks: [], startHour: 8, endHour: 18 }
+  const { blocks, startHour, endHour, spanHours } = useMemo(() => {
+    if (!items.length) return { blocks: [], startHour: 8, endHour: 18, spanHours: 10 }
     const starts = items.map(i => new Date(i.started_at).getHours())
     const ends   = items.map(i => new Date(i.ended_at).getHours())
     const startHour = Math.max(0, Math.min(...starts) - 0)
-    const endHour   = Math.min(23, Math.max(...ends) + 1)
-    const rangeMs = (endHour - startHour) * 3600000 || 1
+    // Keep one full trailing hour so late events (e.g. 23:43) are visible.
+    const endHour   = Math.min(24, Math.max(...ends) + 1)
+    const spanHours = Math.max(1, endHour - startHour)
+    const rangeMs = spanHours * 3600000
     const baseMs = new Date(items[0].started_at).setHours(startHour, 0, 0, 0)
 
     const blocks = items.map(item => {
@@ -28,7 +30,7 @@ export default function ActivityTimeline({ items }: Props) {
       return { ...item, left, width }
     })
 
-    return { blocks, startHour, endHour }
+    return { blocks, startHour, endHour, spanHours }
   }, [items])
 
   if (!items.length) return (
@@ -46,7 +48,7 @@ export default function ActivityTimeline({ items }: Props) {
         {hours.map(h => (
           <div key={h} style={{
             position: 'absolute',
-            left: `${((h - startHour) / (endHour - startHour)) * 100}%`,
+            left: `${((h - startHour) / spanHours) * 100}%`,
             transform: 'translateX(-50%)',
             fontSize: 10,
             color: 'var(--text-muted)',
@@ -64,7 +66,7 @@ export default function ActivityTimeline({ items }: Props) {
           <div key={h} style={{
             position: 'absolute',
             top: 0, bottom: 0,
-            left: `${((h - startHour) / (endHour - startHour)) * 100}%`,
+            left: `${((h - startHour) / spanHours) * 100}%`,
             width: 1,
             background: 'var(--border)',
           }} />

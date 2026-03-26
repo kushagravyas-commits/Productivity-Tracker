@@ -31,8 +31,16 @@ async def init_neon() -> None:
     if not dsn:
         print("Warning: NEONDB_URI not set — data will not be stored.")
         return
-    _pool = await asyncpg.create_pool(_clean_dsn(dsn), ssl='require', min_size=1, max_size=5)
+    # Disable statement cache to avoid InvalidCachedStatementError behind poolers.
+    _pool = await asyncpg.create_pool(
+        _clean_dsn(dsn),
+        ssl='require',
+        min_size=1,
+        max_size=5,
+        statement_cache_size=0,
+    )
     await _create_tables()
+    await _migrate_schema()
     print("Neon PostgreSQL connected.")
 
 
@@ -54,7 +62,8 @@ async def _create_tables() -> None:
                 email              TEXT UNIQUE NOT NULL,
                 role               TEXT NOT NULL DEFAULT 'employee',
                 registration_token TEXT UNIQUE NOT NULL,
-                created_at         TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+                created_at         TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                monitoring_enabled BOOLEAN
             );
 
             CREATE TABLE IF NOT EXISTS devices (
@@ -152,7 +161,30 @@ async def _create_tables() -> None:
                 PRIMARY KEY (team_id, user_id)
             );
             CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members (user_id);
+
+            CREATE TABLE IF NOT EXISTS rejected_devices (
+                machine_guid      TEXT PRIMARY KEY,
+                reason            TEXT,
+                rejected_by_email TEXT,
+                rejected_at       TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+            );
         """)
+
+
+async def _migrate_schema() -> None:
+    """Apply safe, additive migrations for existing Neon databases."""
+    async with _pool.acquire() as conn:
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS monitoring_enabled BOOLEAN;")
+        await conn.execute(
+            """
+            UPDATE users
+            SET monitoring_enabled = CASE
+                WHEN COALESCE(role, 'employee') = 'admin' THEN FALSE
+                ELSE TRUE
+            END
+            WHERE monitoring_enabled IS NULL
+            """
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -319,26 +351,28 @@ async def list_users() -> list[asyncpg.Record]:
 
 
 async def insert_user(full_name: str, email: str, role: str, token: str) -> asyncpg.Record:
+    monitoring_enabled = False if role == "admin" else True
     return await _pool.fetchrow(
         """
-        INSERT INTO users (full_name, email, role, registration_token, created_at)
-        VALUES ($1,$2,$3,$4,NOW()) RETURNING *
+        INSERT INTO users (full_name, email, role, registration_token, created_at, monitoring_enabled)
+        VALUES ($1,$2,$3,$4,NOW(),$5) RETURNING *
         """,
-        full_name, email, role, token,
+        full_name, email, role, token, monitoring_enabled,
     )
 
 
 async def upsert_user(email: str, full_name: str, role: str = "employee") -> asyncpg.Record:
     token = str(uuid.uuid4())[:8].upper()
+    monitoring_enabled = False if role == "admin" else True
     return await _pool.fetchrow(
         """
-        INSERT INTO users (full_name, email, role, registration_token, created_at)
-        VALUES ($1,$2,$3,$4,NOW())
+        INSERT INTO users (full_name, email, role, registration_token, created_at, monitoring_enabled)
+        VALUES ($1,$2,$3,$4,NOW(),$5)
         ON CONFLICT (email) DO UPDATE
           SET full_name=EXCLUDED.full_name, role=EXCLUDED.role
         RETURNING *
         """,
-        full_name, email, role, token,
+        full_name, email, role, token, monitoring_enabled,
     )
 
 
@@ -349,6 +383,25 @@ async def update_user(_email: str, **fields: Any) -> int:
     sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
     vals = list(fields.values())
     result = await _pool.execute(f"UPDATE users SET {sets} WHERE email=$1", _email, *vals)
+    return int(result.split()[-1])
+
+
+def monitoring_enabled_for_user_row(user: asyncpg.Record | None) -> bool:
+    if not user:
+        return True
+    role = user.get("role") or "employee"
+    raw = user.get("monitoring_enabled")
+    if raw is None:
+        return role != "admin"
+    return bool(raw)
+
+
+async def set_user_monitoring(email: str, enabled: bool) -> int:
+    result = await _pool.execute(
+        "UPDATE users SET monitoring_enabled=$2 WHERE email=$1",
+        email,
+        bool(enabled),
+    )
     return int(result.split()[-1])
 
 
@@ -491,7 +544,15 @@ async def find_device_by_guid(guid: str) -> asyncpg.Record | None:
 
 
 async def list_devices() -> list[asyncpg.Record]:
-    return await _pool.fetch("SELECT * FROM devices ORDER BY registered_at")
+    return await _pool.fetch(
+        """
+        SELECT d.*
+        FROM devices d
+        LEFT JOIN rejected_devices rd ON rd.machine_guid = d.machine_guid
+        WHERE rd.machine_guid IS NULL
+        ORDER BY d.registered_at
+        """
+    )
 
 
 async def upsert_device(machine_guid: str, email: str | None, os_type: str | None) -> asyncpg.Record:
@@ -521,6 +582,38 @@ async def update_device_email(old_email: str, new_email: str) -> None:
         "UPDATE devices SET email=$2 WHERE email=$1",
         old_email, new_email,
     )
+
+
+async def reject_device(machine_guid: str, rejected_by_email: str | None = None, reason: str | None = None) -> None:
+    await _pool.execute(
+        """
+        INSERT INTO rejected_devices (machine_guid, reason, rejected_by_email, rejected_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (machine_guid) DO UPDATE
+          SET reason=EXCLUDED.reason,
+              rejected_by_email=EXCLUDED.rejected_by_email,
+              rejected_at=NOW()
+        """,
+        machine_guid,
+        reason,
+        rejected_by_email,
+    )
+
+
+async def unreject_device(machine_guid: str) -> int:
+    result = await _pool.execute(
+        "DELETE FROM rejected_devices WHERE machine_guid=$1",
+        machine_guid,
+    )
+    return int(result.split()[-1])
+
+
+async def is_device_rejected(machine_guid: str) -> bool:
+    row = await _pool.fetchrow(
+        "SELECT machine_guid FROM rejected_devices WHERE machine_guid=$1",
+        machine_guid,
+    )
+    return row is not None
 
 
 # ---------------------------------------------------------------------------

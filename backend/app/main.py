@@ -56,6 +56,7 @@ from app.schemas import (
     DeviceItem,
     DeviceAssignIn,
     UserRoleUpdateIn,
+    UserMonitoringUpdateIn,
     RegisterResponse,
     TeamIn,
     TeamUpdateIn,
@@ -151,6 +152,16 @@ async def get_device_id(machine_guid: str | None = Header(None, alias="X-Machine
     return machine_guid
 
 
+async def should_track_device(device_id: str | None) -> bool:
+    if not device_id:
+        return True
+    device = await neon_db.find_device_by_guid(device_id)
+    if not device or not device.get("email"):
+        return True
+    user = await neon_db.find_user_by_email(device["email"])
+    return neon_db.monitoring_enabled_for_user_row(user)
+
+
 # ---------------------------------------------------------------------------
 # Users
 # ---------------------------------------------------------------------------
@@ -173,6 +184,7 @@ async def create_user(user: UserIn) -> UserItem:
         registration_token=row["registration_token"],
         created_at=row["created_at"],
         team_ids=[],
+        monitoring_enabled=neon_db.monitoring_enabled_for_user_row(row),
     )
 
 
@@ -189,6 +201,7 @@ async def list_users() -> list[UserItem]:
             registration_token=r["registration_token"],
             created_at=r["created_at"],
             team_ids=team_map.get(int(r["id"]), []),
+            monitoring_enabled=neon_db.monitoring_enabled_for_user_row(r),
         )
         for r in rows
     ]
@@ -204,10 +217,29 @@ async def delete_user(email: str) -> MessageResponse:
 
 @app.put("/api/v1/admin/users/{email}/role", response_model=MessageResponse, tags=["admin"])
 async def update_user_role(email: str, payload: UserRoleUpdateIn) -> MessageResponse:
-    count = await neon_db.update_user(email, role=payload.role)
+    update_data = {"role": payload.role}
+    if payload.role == "admin":
+        update_data["monitoring_enabled"] = False
+    else:
+        update_data["monitoring_enabled"] = True
+    count = await neon_db.update_user(email, **update_data)
     if count == 0:
         raise HTTPException(status_code=404, detail="User not found")
     return MessageResponse(message=f"User {email} role updated to {payload.role}")
+
+
+@app.put("/api/v1/admin/users/{email}/monitoring", response_model=MessageResponse, tags=["admin"])
+async def update_user_monitoring(email: str, payload: UserMonitoringUpdateIn) -> MessageResponse:
+    user = await neon_db.find_user_by_email(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if (user.get("role") or "employee") != "admin":
+        raise HTTPException(status_code=400, detail="Monitoring toggle is only for admin users")
+    count = await neon_db.set_user_monitoring(email, payload.monitoring_enabled)
+    if count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+    state = "enabled" if payload.monitoring_enabled else "disabled"
+    return MessageResponse(message=f"Admin monitoring {state} for {email}")
 
 
 @app.put("/api/v1/admin/users/{email}", response_model=MessageResponse, tags=["admin"])
@@ -244,6 +276,12 @@ async def list_devices() -> list[DeviceItem]:
         )
         for r in rows
     ]
+
+
+@app.post("/api/v1/admin/devices/{machine_guid}/reject", response_model=MessageResponse, tags=["admin"])
+async def reject_device(machine_guid: str) -> MessageResponse:
+    await neon_db.reject_device(machine_guid)
+    return MessageResponse(message=f"Device {machine_guid[:8]} rejected")
 
 
 @app.post("/api/v1/admin/devices/{machine_guid}/assign", response_model=MessageResponse, tags=["admin"])
@@ -293,6 +331,8 @@ async def build_team_dashboard(team_id: int, day: date) -> TeamDashboardResponse
         guids = await neon_db.get_machine_guids_for_user_id(uid)
         urow = await neon_db.find_user_by_id(uid)
         if not urow:
+            continue
+        if not neon_db.monitoring_enabled_for_user_row(urow):
             continue
         ev = [dict(r) for r in await neon_db.fetch_events_for_devices(day, guids)]
         idl = [dict(r) for r in await neon_db.fetch_idle_for_devices(day, guids)]
@@ -407,6 +447,7 @@ async def admin_get_team_members(team_id: int) -> list[UserItem]:
             registration_token=r["registration_token"],
             created_at=r["created_at"],
             team_ids=team_map.get(int(r["id"]), []),
+            monitoring_enabled=neon_db.monitoring_enabled_for_user_row(r),
         )
         for r in rows
     ]
@@ -457,6 +498,11 @@ async def register_device(reg: DeviceRegisterIn) -> RegisterResponse:
     resp.mongodb_uri = None
     resp.mongodb_db = None
 
+    # Ignore explicitly rejected devices so they don't reappear in discovery.
+    if await neon_db.is_device_rejected(reg.machine_guid):
+        resp.message = "Device is rejected by admin."
+        return resp
+
     if reg.registration_token:
         user = await neon_db.find_user_by_token(reg.registration_token)
         if not user:
@@ -468,23 +514,32 @@ async def register_device(reg: DeviceRegisterIn) -> RegisterResponse:
         resp.message = "Device registered and assigned."
 
     elif reg.full_name and reg.email:
-        # First user ever - auto-assign admin role
+        # Auto-bootstrap rule: if no admin exists yet in current DB, current registrant becomes admin.
         existing_users = await neon_db.list_users()
-        is_first = not existing_users
-        role = "admin" if is_first else "employee"
+        has_admin = any((u.get("role") or "employee") == "admin" for u in existing_users)
+        existing_user = await neon_db.find_user_by_email(reg.email)
+        if existing_user:
+            current_role = existing_user.get("role") or "employee"
+            role = "admin" if (not has_admin) else current_role
+        else:
+            role = "admin" if (not has_admin) else "employee"
+
         user = await neon_db.upsert_user(reg.email, reg.full_name, role)
         device = await neon_db.upsert_device(reg.machine_guid, reg.email, reg.os_type)
         await neon_db.link_device_to_user(reg.machine_guid, user["id"], reg.email)
-        if is_first:
+        if role == "admin":
             # Auto-setup admin panel access in SQLite for the first user
-            conn = get_connection()
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                ("admin_email", reg.email.lower().strip()),
-            )
-            conn.commit()
-            conn.close()
+            try:
+                conn = get_connection()
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    ("admin_email", reg.email.lower().strip()),
+                )
+                conn.commit()
+                conn.close()
+            except Exception as exc:
+                print(f"[REGISTER] SQLite admin mirror write skipped: {exc}")
         resp.assigned_user = user["full_name"]
         resp.role = user.get("role", role)
         resp.message = "Device registered and assigned."
@@ -545,14 +600,18 @@ async def admin_setup(payload: dict) -> MessageResponse:
         await neon_db.upsert_user(email, guessed_name, "admin")
 
     # Keep local SQLite key for backward compatibility with older binaries/tools.
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        ("admin_email", email),
-    )
-    conn.commit()
-    conn.close()
+    # This should never block successful Neon admin setup in packaged environments.
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            ("admin_email", email),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        print(f"[ADMIN_SETUP] SQLite mirror write skipped: {exc}")
     return MessageResponse(message="Admin verified and setup complete.")
 
 
@@ -614,6 +673,8 @@ def update_setting(payload: SettingUpdate) -> MessageResponse:
 async def ingest_event(event: EventIn, device_id: str | None = Depends(get_device_id)) -> MessageResponse:
     if event.ended_at <= event.started_at:
         raise HTTPException(status_code=400, detail="ended_at must be after started_at")
+    if not await should_track_device(device_id):
+        return MessageResponse(message="ignored_admin_monitoring_disabled")
     await neon_db.insert_event({
         "device_id": device_id,
         "started_at": parse_local_time(event.started_at),
@@ -633,6 +694,8 @@ async def ingest_event(event: EventIn, device_id: str | None = Depends(get_devic
 async def ingest_idle_period(period: IdlePeriodIn, device_id: str | None = Depends(get_device_id)) -> MessageResponse:
     if period.ended_at <= period.started_at:
         raise HTTPException(status_code=400, detail="ended_at must be after started_at")
+    if not await should_track_device(device_id):
+        return MessageResponse(message="ignored_admin_monitoring_disabled")
     await neon_db.insert_idle_period({
         "device_id": device_id,
         "started_at": parse_local_time(period.started_at),
@@ -733,6 +796,8 @@ async def list_events(
 @app.post("/api/v1/context/editor", response_model=MessageResponse, tags=["editor"])
 async def post_editor_context(payload: EditorContextIn, device_id: str | None = Depends(get_device_id)) -> MessageResponse:
     try:
+        if not await should_track_device(device_id):
+            return MessageResponse(message="ignored_admin_monitoring_disabled")
         doc = payload.model_dump()
         doc["device_id"] = device_id
         doc["captured_at"] = parse_local_time(doc["captured_at"])
@@ -805,6 +870,8 @@ async def get_editor_context(
 @app.post("/api/v1/context/browser", response_model=MessageResponse, tags=["browser"])
 async def post_browser_context(payload: BrowserContextIn, device_id: str | None = Depends(get_device_id)) -> MessageResponse:
     try:
+        if not await should_track_device(device_id):
+            return MessageResponse(message="ignored_admin_monitoring_disabled")
         from app.services.classifier import classifier as _clf
         doc = payload.model_dump()
         doc["device_id"] = device_id
@@ -880,6 +947,8 @@ async def get_browser_context(
 
 @app.post("/api/v1/context/app", response_model=MessageResponse, tags=["app"])
 async def post_app_context(payload: AppContextIn, device_id: str | None = Depends(get_device_id)) -> MessageResponse:
+    if not await should_track_device(device_id):
+        return MessageResponse(message="ignored_admin_monitoring_disabled")
     doc = payload.model_dump()
     doc["device_id"] = device_id
     doc["captured_at"] = parse_local_time(doc["captured_at"])
