@@ -91,7 +91,10 @@ def build_productivity_breakdown(events: list[dict], idle_seconds: int) -> dict[
 
 def build_kpis(events: list[dict], idle_seconds: int) -> list[dict]:
     totals = productivity_totals(events)
-    tracked_seconds = sum(totals.values())
+    # Tracked should represent total observed time for the day, including idle.
+    # This keeps KPI "Tracked" consistent with productivity_breakdown totals (minutes)
+    # and with team/member rollups that include idle.
+    tracked_seconds = sum(totals.values()) + max(int(idle_seconds or 0), 0)
     kpis = [
         {"label": "Tracked", "value_seconds": tracked_seconds, "display": format_seconds(tracked_seconds)},
         {
