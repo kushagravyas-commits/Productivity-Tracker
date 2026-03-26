@@ -79,7 +79,8 @@ function addToStartup() {
       openAtLogin: true,
       openAsHidden: true
     })
-    console.log('Added to macOS login items')
+    const settings = app.getLoginItemSettings()
+    console.log(`Added to macOS login items (openAtLogin=${settings.openAtLogin})`)
   } catch (e) {
     console.error('Failed to add to login items:', e.message)
   }
@@ -90,7 +91,8 @@ function removeFromStartup() {
     app.setLoginItemSettings({
       openAtLogin: false
     })
-    console.log('Removed from macOS login items')
+    const settings = app.getLoginItemSettings()
+    console.log(`Removed from macOS login items (openAtLogin=${settings.openAtLogin})`)
   } catch (e) {}
 }
 
@@ -360,6 +362,10 @@ function createTray(role) {
 
 // --- App lifecycle ---
 app.whenReady().then(async () => {
+  // Register login item immediately so first-launch employee setups persist across reboot,
+  // even if role detection/startup flow takes time or exits early.
+  addToStartup()
+
   // Hide macOS dock icon optionally if employee
   if (app.dock) app.dock.hide()
 
