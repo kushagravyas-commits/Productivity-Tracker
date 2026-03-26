@@ -507,6 +507,17 @@ async def get_device_role(machine_guid: str) -> dict:
     """Return the role for the user linked to this device."""
     device = await neon_db.find_device_by_guid(machine_guid)
     if not device or not device.get("email"):
+        # Bootstrap behavior for fresh DBs:
+        # If there is no admin user in the currently configured Postgres instance,
+        # treat the first device as admin so Electron shows UI without manual steps.
+        try:
+            users = await neon_db.list_users()
+            has_admin = any((u.get("role") or "employee") == "admin" for u in users)
+            if not has_admin:
+                return {"role": "admin", "assigned_user": None}
+        except Exception:
+            # If DB is unreachable, don't guess.
+            pass
         return {"role": None, "assigned_user": None}
     user = await neon_db.find_user_by_email(device["email"])
     if not user:
@@ -515,14 +526,25 @@ async def get_device_role(machine_guid: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Admin setup (SQLite)
+# Admin setup/status (Neon users table is source of truth)
 # ---------------------------------------------------------------------------
 
 @app.post("/api/v1/admin/setup", response_model=MessageResponse, tags=["admin"])
-def admin_setup(payload: dict) -> MessageResponse:
+async def admin_setup(payload: dict) -> MessageResponse:
     email = payload.get("email", "").lower().strip()
-    if email not in ALLOWED_ADMIN_EMAILS:
-        raise HTTPException(status_code=403, detail="Unauthorized email.")
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required.")
+
+    # Ensure admin exists in the active Neon/Postgres instance backing this URI.
+    # This makes admin bootstrap reset automatically when DB URI changes.
+    existing = await neon_db.find_user_by_email(email)
+    if existing:
+        await neon_db.update_user(email, role="admin")
+    else:
+        guessed_name = email.split("@")[0].replace(".", " ").replace("_", " ").title() or "Admin"
+        await neon_db.upsert_user(email, guessed_name, "admin")
+
+    # Keep local SQLite key for backward compatibility with older binaries/tools.
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
@@ -535,12 +557,27 @@ def admin_setup(payload: dict) -> MessageResponse:
 
 
 @app.get("/api/v1/admin/status", response_model=dict, tags=["admin"])
-def get_admin_status() -> dict:
-    conn = get_connection()
-    cur = conn.cursor()
-    row = cur.execute("SELECT value FROM settings WHERE key = 'admin_email'").fetchone()
-    conn.close()
-    return {"is_setup": row is not None, "admin_email": row["value"] if row else None}
+async def get_admin_status() -> dict:
+    # Source of truth is Neon users for the currently configured DB URI.
+    # This guarantees that changing DB URI to a fresh instance re-enables first-time admin setup.
+    try:
+        users = await neon_db.list_users()
+    except Exception:
+        # If DB is unreachable, report not-setup rather than leaking local SQLite state.
+        return {"is_setup": False, "admin_email": None}
+
+    admin_users = [u for u in users if (u.get("role") or "employee") == "admin"]
+    if not admin_users:
+        # Auto-bootstrap: in a fresh DB, if the first user exists but is employee,
+        # promote the oldest user to admin so first user becomes admin automatically.
+        if users:
+            users.sort(key=lambda u: u["created_at"])
+            first = users[0]
+            await neon_db.update_user(first["email"], role="admin")
+            return {"is_setup": True, "admin_email": first["email"]}
+        return {"is_setup": False, "admin_email": None}
+    admin_users.sort(key=lambda u: u["created_at"])
+    return {"is_setup": True, "admin_email": admin_users[0]["email"]}
 
 
 # ---------------------------------------------------------------------------

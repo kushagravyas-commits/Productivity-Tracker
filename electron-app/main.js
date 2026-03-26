@@ -156,6 +156,23 @@ function fetchDeviceRole(machineGuid) {
   })
 }
 
+function fetchAdminStatus() {
+  return new Promise((resolve) => {
+    http.get(`${SERVER_URL}/api/v1/admin/status`, (res) => {
+      let body = ''
+      res.on('data', (chunk) => { body += chunk })
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(body)
+          resolve(!!data?.is_setup)
+        } catch (e) {
+          resolve(false)
+        }
+      })
+    }).on('error', () => resolve(false))
+  })
+}
+
 // --- Poll until role is available (agent may still be registering) ---
 async function waitForRole(machineGuid, maxAttempts = 30) {
   for (let i = 0; i < maxAttempts; i++) {
@@ -404,6 +421,17 @@ app.whenReady().then(async () => {
     console.log('Server is ready!')
   } catch (err) {
     console.error('Server failed to start:', err)
+  }
+
+  // Fresh DB bootstrap: if no admin exists in active DB URI, open admin UI immediately.
+  const isAdminSetup = await fetchAdminStatus()
+  if (!isAdminSetup) {
+    console.log('Admin not setup for current DB. Starting in admin bootstrap mode.')
+    deviceRole = 'admin'
+    removeFromStartup()
+    createTray('admin')
+    createWindow()
+    return
   }
 
   // Determine device role — poll until agent has registered
