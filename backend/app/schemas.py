@@ -186,6 +186,7 @@ class UserItem(BaseModel):
     registration_token: str
     created_at: datetime
     team_ids: list[int] = Field(default_factory=list)
+    monitoring_enabled: bool = True
 
 
 class DeviceRegisterIn(BaseModel):
@@ -224,6 +225,10 @@ class UserUpdateIn(BaseModel):
     full_name: str | None = None
     email: str | None = None
     role: Literal["admin", "employee"] | None = None
+
+
+class UserMonitoringUpdateIn(BaseModel):
+    monitoring_enabled: bool
 
 
 class RegisterResponse(BaseModel):

@@ -62,6 +62,7 @@ export interface UserItem {
   registration_token: string
   created_at: string
   team_ids?: number[]
+  monitoring_enabled?: boolean
 }
 
 export interface DeviceItem {
@@ -115,8 +116,16 @@ export async function assignDevice(machine_guid: string, full_name: string, emai
   await api.post(`/api/v1/admin/devices/${machine_guid}/assign`, { full_name, email, role })
 }
 
+export async function rejectDevice(machine_guid: string): Promise<void> {
+  await api.post(`/api/v1/admin/devices/${machine_guid}/reject`)
+}
+
 export async function deleteUser(email: string): Promise<void> {
   await api.delete(`/api/v1/admin/users/${email}`)
+}
+
+export async function updateUserMonitoring(email: string, monitoring_enabled: boolean): Promise<void> {
+  await api.put(`/api/v1/admin/users/${email}/monitoring`, { monitoring_enabled })
 }
 
 // --- Teams ---

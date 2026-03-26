@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { listUsers, createUser, listDevices, listTeams, deleteUser, updateUserRole, updateUser, assignDevice, type UserItem, type DeviceItem, type TeamItem } from '../api'
+import { listUsers, createUser, listDevices, listTeams, deleteUser, updateUserRole, updateUser, updateUserMonitoring, assignDevice, rejectDevice, type UserItem, type DeviceItem, type TeamItem } from '../api'
 
 interface UsersProps {
   onSelectUser: (machineGuid: string) => void
@@ -128,6 +128,25 @@ export default function Users({ onSelectUser, isDarkMode, onThemeToggle }: Users
       await loadData()
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Could not assign device')
+    }
+  }
+
+  async function handleToggleAdminMonitoring(user: UserItem) {
+    try {
+      await updateUserMonitoring(user.email, !(user.monitoring_enabled ?? false))
+      await loadData()
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Could not update admin monitoring')
+    }
+  }
+
+  async function handleRejectDevice(machineGuid: string) {
+    if (!confirm(`Reject device ${machineGuid.substring(0, 12)}...?`)) return
+    try {
+      await rejectDevice(machineGuid)
+      await loadData()
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Could not reject device')
     }
   }
 
@@ -318,6 +337,8 @@ export default function Users({ onSelectUser, isDarkMode, onThemeToggle }: Users
               const userDevice = devices.find(d => d.email === u.email)
               const isEditing = editingCard === u.email
               const teamNames = (u.team_ids ?? []).map(id => teamIdToName.get(id)).filter(Boolean) as string[]
+              const isAdmin = u.role === 'admin'
+              const adminMonitoringEnabled = u.monitoring_enabled ?? false
               
               return (
                 <div key={u.email} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 16, border: isEditing ? '2px solid var(--accent)' : '1px solid var(--border)' }}>
@@ -469,17 +490,33 @@ export default function Users({ onSelectUser, isDarkMode, onThemeToggle }: Users
 
                   <div style={{ marginTop: 'auto', paddingTop: 16, borderTop: '1px solid var(--border)' }}>
                     {userDevice ? (
-                      <button 
-                        className="btn btn-primary" 
-                        style={{ width: '100%', justifyContent: 'center' }}
-                        onClick={() => onSelectUser(userDevice.machine_guid)}
-                      >
-                        View Tracking Dashboard
-                      </button>
+                      isAdmin && !adminMonitoringEnabled ? (
+                        <div style={{ textAlign: 'center', padding: '12px', background: 'var(--bg-elevated)', borderRadius: 8, fontSize: 12, color: 'var(--text-muted)' }}>
+                          Admin monitoring is disabled.
+                        </div>
+                      ) : (
+                        <button 
+                          className="btn btn-primary" 
+                          style={{ width: '100%', justifyContent: 'center' }}
+                          onClick={() => onSelectUser(userDevice.machine_guid)}
+                        >
+                          View Tracking Dashboard
+                        </button>
+                      )
                     ) : (
                       <div style={{ textAlign: 'center', padding: '12px', background: 'var(--bg-elevated)', borderRadius: 8, fontSize: 12, color: 'var(--text-muted)' }}>
                         Waiting for device assignment...
                       </div>
+                    )}
+                    {isAdmin && (
+                      <button
+                        className={`btn ${adminMonitoringEnabled ? 'btn-primary' : 'btn-ghost'}`}
+                        style={{ width: '100%', justifyContent: 'center', marginTop: 8 }}
+                        onClick={() => void handleToggleAdminMonitoring(u)}
+                        title="Toggle monitoring for this admin"
+                      >
+                        {adminMonitoringEnabled ? 'Disable Admin Monitoring' : 'Enable Admin Monitoring'}
+                      </button>
                     )}
                   </div>
                 </div>
@@ -516,6 +553,13 @@ export default function Users({ onSelectUser, isDarkMode, onThemeToggle }: Users
                   }}
                 >
                   Assign User
+                </button>
+                <button
+                  className="btn btn-ghost"
+                  style={{ padding: '4px 12px', fontSize: 11, color: 'var(--red)' }}
+                  onClick={() => void handleRejectDevice(d.machine_guid)}
+                >
+                  Reject
                 </button>
               </div>
             ))
