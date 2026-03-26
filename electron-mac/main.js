@@ -362,10 +362,6 @@ function createTray(role) {
 
 // --- App lifecycle ---
 app.whenReady().then(async () => {
-  // Register login item immediately so first-launch employee setups persist across reboot,
-  // even if role detection/startup flow takes time or exits early.
-  addToStartup()
-
   // Hide macOS dock icon optionally if employee
   if (app.dock) app.dock.hide()
 
