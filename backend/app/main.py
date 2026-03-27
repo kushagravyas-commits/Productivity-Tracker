@@ -498,10 +498,16 @@ async def register_device(reg: DeviceRegisterIn) -> RegisterResponse:
     resp.mongodb_uri = None
     resp.mongodb_db = None
 
-    # Ignore explicitly rejected devices so they don't reappear in discovery.
+    # Rejected devices are blocked from silent rediscovery.
+    # But if the user explicitly attempts onboarding (token or name+email),
+    # allow re-onboarding by removing rejection for this machine.
     if await neon_db.is_device_rejected(reg.machine_guid):
-        resp.message = "Device is rejected by admin."
-        return resp
+        explicit_onboarding = bool(reg.registration_token) or bool(reg.full_name and reg.email)
+        if explicit_onboarding:
+            await neon_db.unreject_device(reg.machine_guid)
+        else:
+            resp.message = "Device is rejected by admin."
+            return resp
 
     if reg.registration_token:
         user = await neon_db.find_user_by_token(reg.registration_token)
@@ -622,8 +628,8 @@ async def get_admin_status() -> dict:
     try:
         users = await neon_db.list_users()
     except Exception:
-        # If DB is unreachable, report not-setup rather than leaking local SQLite state.
-        return {"is_setup": False, "admin_email": None}
+        # If DB is unreachable, report unknown state so clients don't force admin bootstrap.
+        return {"is_setup": None, "admin_email": None, "db_reachable": False}
 
     admin_users = [u for u in users if (u.get("role") or "employee") == "admin"]
     if not admin_users:
@@ -633,10 +639,10 @@ async def get_admin_status() -> dict:
             users.sort(key=lambda u: u["created_at"])
             first = users[0]
             await neon_db.update_user(first["email"], role="admin")
-            return {"is_setup": True, "admin_email": first["email"]}
-        return {"is_setup": False, "admin_email": None}
+            return {"is_setup": True, "admin_email": first["email"], "db_reachable": True}
+        return {"is_setup": False, "admin_email": None, "db_reachable": True}
     admin_users.sort(key=lambda u: u["created_at"])
-    return {"is_setup": True, "admin_email": admin_users[0]["email"]}
+    return {"is_setup": True, "admin_email": admin_users[0]["email"], "db_reachable": True}
 
 
 # ---------------------------------------------------------------------------

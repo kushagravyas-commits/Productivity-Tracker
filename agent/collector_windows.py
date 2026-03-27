@@ -329,15 +329,20 @@ class WindowsTracker:
         return f"fallback-{fallback_id}"
 
     def ensure_registered(self) -> None:
-        """Load saved config and silently re-register with backend on every launch."""
+        """Load saved config and re-register; prompt if still unassigned/rejected."""
         if CONFIG_PATH.exists():
             try:
                 config = json.loads(CONFIG_PATH.read_text())
                 if config.get("machine_guid") == self.machine_guid:
                     self.api_base_url = config.get("api_base_url", self.api_base_url)
                     print("Registration config loaded.")
-                    # Always silently re-register so device stays linked in DB
-                    self.perform_registration()
+                    # Always silently re-register so device stays linked in DB.
+                    # If re-registration is not assigned (including rejected/unassigned),
+                    # show onboarding dialog instead of silently continuing.
+                    is_assigned = self.perform_registration()
+                    if is_assigned:
+                        return
+                    self.show_registration_dialog()
                     return
             except:
                 pass

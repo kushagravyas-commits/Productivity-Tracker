@@ -134,12 +134,20 @@ function fetchAdminStatus() {
       res.on('end', () => {
         try {
           const data = JSON.parse(body)
-          resolve(!!data?.is_setup)
+          // Tri-state:
+          // true  -> admin is set up
+          // false -> confirmed fresh DB (no admin)
+          // null  -> status unknown (avoid forcing admin by mistake)
+          if (typeof data?.is_setup === 'boolean') {
+            resolve(data.is_setup)
+          } else {
+            resolve(null)
+          }
         } catch (e) {
-          resolve(false)
+          resolve(null)
         }
       })
-    }).on('error', () => resolve(false))
+    }).on('error', () => resolve(null))
   })
 }
 
@@ -404,7 +412,7 @@ app.whenReady().then(async () => {
 
   // Fresh DB bootstrap: if no admin exists in active DB URI, open admin UI immediately.
   const isAdminSetup = await fetchAdminStatus()
-  if (!isAdminSetup) {
+  if (isAdminSetup === false) {
     console.log('Admin not setup for current DB. Starting in admin bootstrap mode.')
     deviceRole = 'admin'
     removeFromStartup()
